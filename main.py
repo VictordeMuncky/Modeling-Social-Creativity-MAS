@@ -226,7 +226,10 @@ def main():
         'evaluated_novelty', 'evaluated_interest', 'accepted',
         'creator_id', 'evaluator_id', 'domain_size',
         'parent1_id', 'parent2_id',
-        'source', 'trigger_novelty'
+        'source', 'trigger_novelty',
+        'root_creator_id', 'lineage_depth', 'generation_step', 'entered_domain_step',
+        'views', 'shares', 'likes', 'domain_entry_count', 'popularity_score',
+        'nearest_domain_artifact_id', 'nearest_domain_similarity', 'domain_source'
     ]
     csv_logger = CSVLogger(
         log_file_path=csv_log_file, 

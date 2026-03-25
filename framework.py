@@ -21,20 +21,13 @@ class Artifact:
     Represents a generated creative artifact.
 
     An artifact is the fundamental unit of exchange and evaluation in the system.
-    It contains the content (the expression tree), metadata about its creation
-    (lineage), and cached features for evaluation.
+    Besides expression content and feature vectors, it now also carries a
+    metadata dictionary that can support richer domain structures such as
+    similarity-based neighborhoods, lineage graphs, and popularity signals.
 
-    Attributes:
-        id (int): Unique identifier for the artifact.
-        content (Any): The core content of the artifact (e.g., ExpressionNode).
-        creator_id (int): The ID of the original creator of this artifact's lineage.
-        producer_id (int): The ID of the agent that produced this concrete artifact instance.
-        features (Optional[torch.Tensor]): Feature vector representing the artifact
-            in the conceptual space (used for distance calculations).
-        novelty (Optional[float]): The calculated novelty score of the artifact.
-        interest (Optional[float]): The calculated interest score of the artifact.
-        parent1_id (Optional[int]): ID of the first parent artifact (if bred).
-        parent2_id (Optional[int]): ID of the second parent artifact (if bred).
+    The metadata layer is intentionally generic: the base simulation can ignore
+    it, while downstream experiments can build alternative domain structures on
+    top of the same artifact object.
     """
     next_id = 0
     def __init__(
@@ -43,7 +36,8 @@ class Artifact:
         creator_id: int,
         parent1_id: Optional[int] = None,
         parent2_id: Optional[int] = None,
-        producer_id: Optional[int] = None
+        producer_id: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ):
         self.id = Artifact.next_id
         Artifact.next_id += 1
@@ -55,6 +49,77 @@ class Artifact:
         self.interest: Optional[float] = None
         self.parent1_id = parent1_id
         self.parent2_id = parent2_id
+
+        base_metadata = {
+            'artifact_id': self.id,
+            'root_creator_id': creator_id,
+            'producer_id': self.producer_id,
+            'parent_ids': [pid for pid in (parent1_id, parent2_id) if pid is not None],
+            'lineage_depth': 0 if parent1_id is None and parent2_id is None else 1,
+            'generation_step': None,
+            'entered_domain_step': None,
+            'domain_entry_count': 0,
+            'domain_entry_history': [],
+            'views': 0,
+            'viewers': [],
+            'shares': 0,
+            'share_pairs': [],
+            'likes': 0,
+            'liked_by': [],
+            'accepted_by': [],
+            'popularity_score': 0.0,
+            'feature_dims': None,
+            'nearest_domain_artifact_id': None,
+            'nearest_domain_similarity': None,
+            'domain_cluster_hint': None,
+            'domain_source': 'generation',
+            'lineage_signature': f"{creator_id}:{parent1_id}:{parent2_id}",
+        }
+        if metadata:
+            base_metadata.update(metadata)
+        self.metadata: Dict[str, Any] = base_metadata
+
+    def add_view(self, viewer_id: int):
+        self.metadata['views'] = int(self.metadata.get('views', 0)) + 1
+        viewers = set(self.metadata.get('viewers', []))
+        viewers.add(int(viewer_id))
+        self.metadata['viewers'] = sorted(viewers)
+
+    def add_share(self, sender_id: int, recipient_id: int, step: Optional[int] = None):
+        self.metadata['shares'] = int(self.metadata.get('shares', 0)) + 1
+        pairs = list(self.metadata.get('share_pairs', []))
+        pairs.append({
+            'step': step,
+            'sender_id': int(sender_id),
+            'recipient_id': int(recipient_id),
+        })
+        self.metadata['share_pairs'] = pairs
+
+    def add_like(self, agent_id: int):
+        likes = set(self.metadata.get('liked_by', []))
+        likes.add(int(agent_id))
+        self.metadata['liked_by'] = sorted(likes)
+        self.metadata['likes'] = len(self.metadata['liked_by'])
+
+    def add_domain_entry(self, agent_id: int, step: Optional[int] = None):
+        accepted_by = set(self.metadata.get('accepted_by', []))
+        accepted_by.add(int(agent_id))
+        self.metadata['accepted_by'] = sorted(accepted_by)
+        history = list(self.metadata.get('domain_entry_history', []))
+        history.append({'step': step, 'agent_id': int(agent_id)})
+        self.metadata['domain_entry_history'] = history
+        self.metadata['domain_entry_count'] = len(history)
+        if self.metadata.get('entered_domain_step') is None:
+            self.metadata['entered_domain_step'] = step
+
+    def refresh_popularity_score(self):
+        self.metadata['popularity_score'] = float(
+            self.metadata.get('views', 0)
+            + 2 * self.metadata.get('shares', 0)
+            + 3 * self.metadata.get('likes', 0)
+            + 4 * len(self.metadata.get('accepted_by', []))
+        )
+        return self.metadata['popularity_score']
 
 class ArtifactGenerator(abc.ABC):
     """
