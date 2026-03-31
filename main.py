@@ -189,6 +189,10 @@ def main():
                         choices=['classic', 'extended'],
                         help='DEVIATION(paper 3.4): "classic" matches paper; '
                              '"extended" adds hedonic retreat (experimental, WIP).')
+    parser.add_argument('--domain_mode', type=str, default='flat',
+                        choices=['flat', 'similarity', 'lineage', 'popularity'],
+                        help='Domain retrieval/indexing mode. "flat" preserves the baseline '
+                             'archive behavior as closely as possible.')
     parser.add_argument('--save_images', action='store_true',
                         help='Save rendered artifact PNGs (debug).')
     parser.add_argument('--image_output_dir', type=str, default=None,
@@ -229,7 +233,8 @@ def main():
         'source', 'trigger_novelty',
         'root_creator_id', 'lineage_depth', 'generation_step', 'entered_domain_step',
         'views', 'shares', 'likes', 'domain_entry_count', 'popularity_score',
-        'nearest_domain_artifact_id', 'nearest_domain_similarity', 'domain_source'
+        'nearest_domain_artifact_id', 'nearest_domain_similarity', 'domain_source',
+        'domain_mode'
     ]
     csv_logger = CSVLogger(
         log_file_path=csv_log_file, 
@@ -259,6 +264,22 @@ def main():
         allowed_event_types=['agent_state']
     )
 
+    # --- Domain Observability Logger Setup ---
+    domain_log_file = os.path.join(log_dir, "domain.csv")
+    domain_log_fields = [
+        'timestamp', 'event_type', 'step', 'operation', 'domain_mode', 'retrieval_mode',
+        'query_artifact_id', 'retrieved_artifact_id', 'artifact_id', 'creator_id', 'accepted_by',
+        'relation_type', 'relevance_score', 'is_new_artifact', 'domain_size',
+        'root_creator_id', 'lineage_depth', 'generation_step', 'entered_domain_step',
+        'views', 'shares', 'likes', 'domain_entry_count', 'popularity_score',
+        'nearest_domain_artifact_id', 'nearest_domain_similarity', 'domain_source'
+    ]
+    domain_logger = CSVLogger(
+        log_file_path=domain_log_file,
+        fieldnames=domain_log_fields,
+        allowed_event_types=['domain_event']
+    )
+
     # --- TensorBoard Logger Setup ---
     tensorboard_logger = TensorBoardLogger(log_dir=log_dir)
 
@@ -267,7 +288,8 @@ def main():
         csv_logger, 
         tensorboard_logger, 
         agent_init_logger, 
-        agent_state_logger
+        agent_state_logger,
+        domain_logger
     ])
 
     # Setup artifact generator
@@ -286,6 +308,7 @@ def main():
             pca_calibration_samples=args.pca_calibration_samples,
             distance_metric=args.distance_metric,
             boredom_mode=args.boredom_mode,
+            domain_mode=args.domain_mode,
             save_images=args.save_images,
             image_output_dir=image_output_dir
     )
@@ -293,6 +316,7 @@ def main():
     print(f"Starting simulation with {num_agents} agents for {num_steps} steps.")
     print(f"Sharing with {share_count} agents. Uniform novelty: {uniform_novelty_pref}")
     print(f"Mutation rate: {mutation_rate}")
+    print(f"Domain mode: {args.domain_mode}")
     print(f"Using static noise: {use_static_noise}")
     print(f"Logs will be saved in: {log_dir}")
     

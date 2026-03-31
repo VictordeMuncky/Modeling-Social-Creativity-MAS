@@ -27,6 +27,7 @@ import torchvision
 import os
 from typing import List, Dict
 from framework import Scheduler, Agent, Artifact, ArtifactGenerator, Logger
+from domain import Domain
 import genart
 from features import FeatureExtractor
 from knn import kNN
@@ -183,6 +184,7 @@ class ParallelScheduler(Scheduler):
                  use_static_noise: bool = False, feature_dims: int = 0,
                  pca_calibration_samples: int = 500, distance_metric: str = 'cosine',
                  boredom_mode: str = 'classic',
+                 domain_mode: str = 'flat',
                  save_images: bool = False,
                  image_output_dir: str = None):
         """
@@ -202,6 +204,7 @@ class ParallelScheduler(Scheduler):
         self.uniform_novelty_pref = uniform_novelty_pref
         self.distance_metric = distance_metric
         self.boredom_mode = boredom_mode
+        self.domain_mode = domain_mode
         self.save_images = save_images
         self.image_output_dir = image_output_dir
 
@@ -240,15 +243,10 @@ class ParallelScheduler(Scheduler):
 
         self.agents: List[Agent] = self._initialize_agents()
 
-        # Domain: shared artifact repository (2.2 DIFI model)
-        # Paper: no curation, artifacts remain indefinitely.
-        self.domain: List[Artifact] = []
-        self.domain_metadata = {
-            'artifact_ids': set(),
-            'by_creator': defaultdict(list),
-            'by_lineage_parent': defaultdict(list),
-            'popularity_ranking': {},
-        }
+        # Domain: shared cultural-memory object.
+        # The same stored artifacts can be retrieved through different
+        # structural interpretations without changing the rest of the loop.
+        self.domain = Domain(mode=self.domain_mode)
 
         # Initialize Stats Tracker
         self.stats = StatsTracker()
@@ -273,61 +271,34 @@ class ParallelScheduler(Scheduler):
             'nearest_domain_artifact_id': metadata.get('nearest_domain_artifact_id'),
             'nearest_domain_similarity': metadata.get('nearest_domain_similarity'),
             'domain_source': metadata.get('domain_source'),
+            'domain_mode': self.domain.mode,
         }
 
     def _initialize_artifact_metadata(self, artifact: Artifact, source: str = 'generation'):
-        metadata = artifact.metadata
-        metadata['artifact_id'] = artifact.id
-        metadata['root_creator_id'] = artifact.creator_id
-        metadata['producer_id'] = artifact.producer_id
-        metadata['parent_ids'] = [pid for pid in (artifact.parent1_id, artifact.parent2_id) if pid is not None]
-        metadata['lineage_depth'] = 0 if not metadata['parent_ids'] else 1
-        metadata['generation_step'] = self.step_count
-        metadata['feature_dims'] = None if artifact.features is None else int(artifact.features.shape[0])
-        metadata['domain_source'] = source
-        artifact.refresh_popularity_score()
+        self.domain.prepare_artifact(artifact, step=self.step_count, source=source)
 
     def _update_similarity_metadata(self, artifact: Artifact):
-        metadata = artifact.metadata
-        metadata['feature_dims'] = None if artifact.features is None else int(artifact.features.shape[0])
-        if artifact.features is None or not self.domain:
-            metadata['nearest_domain_artifact_id'] = None
-            metadata['nearest_domain_similarity'] = None
-            metadata['domain_cluster_hint'] = None
-            return
-
-        domain_candidates = [a for a in self.domain if a.features is not None and a.id != artifact.id]
-        if not domain_candidates:
-            metadata['nearest_domain_artifact_id'] = None
-            metadata['nearest_domain_similarity'] = None
-            metadata['domain_cluster_hint'] = None
-            return
-
-        query = torch.nn.functional.normalize(artifact.features.float(), dim=0)
-        matrix = torch.stack([torch.nn.functional.normalize(a.features.float(), dim=0) for a in domain_candidates])
-        similarities = torch.mv(matrix, query)
-        best_idx = int(torch.argmax(similarities).item())
-        best_artifact = domain_candidates[best_idx]
-        best_similarity = float(similarities[best_idx].item())
-        metadata['nearest_domain_artifact_id'] = best_artifact.id
-        metadata['nearest_domain_similarity'] = best_similarity
-        metadata['domain_cluster_hint'] = f"creator_{best_artifact.creator_id}"
+        self.domain.update_similarity_metadata(artifact)
 
     def _register_domain_artifact(self, artifact: Artifact, accepted_by: int):
-        if artifact.id not in self.domain_metadata['artifact_ids']:
-            self.domain.append(artifact)
-            self.domain_metadata['artifact_ids'].add(artifact.id)
-
-        self.domain_metadata['by_creator'][artifact.creator_id].append(artifact.id)
-        for parent_id in artifact.metadata.get('parent_ids', []):
-            self.domain_metadata['by_lineage_parent'][parent_id].append(artifact.id)
-
-        artifact.add_domain_entry(accepted_by, self.step_count)
-        artifact.add_like(accepted_by)
+        is_new, popularity = self.domain.add_artifact(artifact, accepted_by=accepted_by, step=self.step_count)
         artifact.metadata['lineage_depth'] = max(artifact.metadata.get('lineage_depth', 0), len(artifact.metadata.get('parent_ids', [])))
-        popularity = artifact.refresh_popularity_score()
-        self.domain_metadata['popularity_ranking'][artifact.id] = popularity
-        self._update_similarity_metadata(artifact)
+        self.logger.log_event('domain_event', {
+            'step': self.step_count,
+            'operation': 'add',
+            'artifact_id': artifact.id,
+            'creator_id': artifact.creator_id,
+            'accepted_by': accepted_by,
+            'is_new_artifact': is_new,
+            'domain_size': len(self.domain),
+            'domain_mode': self.domain.mode,
+            'retrieval_mode': self.domain.mode,
+            'relevance_score': popularity,
+            'query_artifact_id': None,
+            'retrieved_artifact_id': artifact.id,
+            'relation_type': 'accepted_into_domain',
+            **self._artifact_metadata_snapshot(artifact),
+        })
 
     def _sanitize_tensor(self, tensor: torch.Tensor, source: str,
                          agent_id: int = None, artifact: Artifact = None,
@@ -764,6 +735,7 @@ class ParallelScheduler(Scheduler):
             accepted = False
             if interest > self.domain_threshold:
                 accepted = True
+                recipient.num_domain_adoptions += 1
                 self._register_domain_artifact(artifact, accepted_by=recipient.unique_id)
 
             # Algorithm 1: adopt if h^n_i > h_i (independent of domain check)
@@ -808,6 +780,7 @@ class ParallelScheduler(Scheduler):
                 'creator_id': artifact.creator_id,
                 'evaluator_id': recipient.unique_id,
                 'domain_size': len(self.domain),
+                'domain_mode': self.domain.mode,
                 **self._artifact_metadata_snapshot(artifact),
             })
             
@@ -968,6 +941,7 @@ class ParallelScheduler(Scheduler):
                 'creator_id': artifact.creator_id,
                 'evaluator_id': agent.unique_id,
                 'domain_size': len(self.domain),
+                'domain_mode': self.domain.mode,
                 **self._artifact_metadata_snapshot(artifact),
             })
 
@@ -1019,9 +993,18 @@ class ParallelScheduler(Scheduler):
             if not self.domain:
                 continue
 
-            domain_artifact = random.choice(self.domain)
+            query_artifact = self.domain.get(agent.current_artifact_id)
+            domain_artifact, retrieval_info = self.domain.retrieve(
+                query_artifact=query_artifact,
+                query_features=agent.current_features,
+                query_artifact_id=agent.current_artifact_id,
+                mode=self.domain.mode,
+                exclude_artifact_id=agent.current_artifact_id,
+            )
+            if domain_artifact is None:
+                continue
             classic_agents.append(agent)
-            chosen_artifacts.append(domain_artifact)
+            chosen_artifacts.append((domain_artifact, retrieval_info))
 
         if not classic_agents:
             return
@@ -1038,7 +1021,8 @@ class ParallelScheduler(Scheduler):
         uncached_indices:  list = []   # positions in classic_agents that need rendering
         uncached_artifacts: list = []  # corresponding chosen_artifacts
 
-        for idx, art in enumerate(chosen_artifacts):
+        for idx, retrieval_payload in enumerate(chosen_artifacts):
+            art, _ = retrieval_payload
             if art.features is not None:
                 cached_features.append((idx, art.features))
             else:
@@ -1147,7 +1131,8 @@ class ParallelScheduler(Scheduler):
         # ------------------------------------------------------------------
         # Pass 2: distribute results
         # ------------------------------------------------------------------
-        for i, (agent, domain_artifact) in enumerate(zip(classic_agents, chosen_artifacts)):
+        for i, (agent, retrieval_payload) in enumerate(zip(classic_agents, chosen_artifacts)):
+            domain_artifact, retrieval_info = retrieval_payload
             features           = features_batch[i]           # (feat_dim,)
             raw_novelty        = novelty_scores[i].item()
             normalized_novelty = self._normalize_novelty(raw_novelty)
@@ -1179,6 +1164,23 @@ class ParallelScheduler(Scheduler):
                 agent.current_artifact_id = domain_artifact.id
                 agent.current_creator_id  = domain_artifact.creator_id
 
+            self.logger.log_event('domain_event', {
+                'step': self.step_count,
+                'operation': 'retrieve',
+                'artifact_id': domain_artifact.id,
+                'creator_id': domain_artifact.creator_id,
+                'accepted_by': None,
+                'is_new_artifact': None,
+                'domain_size': len(self.domain),
+                'domain_mode': self.domain.mode,
+                'retrieval_mode': retrieval_info.get('retrieval_mode'),
+                'relevance_score': retrieval_info.get('score'),
+                'query_artifact_id': agent.current_artifact_id,
+                'retrieved_artifact_id': domain_artifact.id,
+                'relation_type': retrieval_info.get('relation_type'),
+                **self._artifact_metadata_snapshot(domain_artifact),
+            })
+
             self.logger.log_event('boredom_adoption', {
                 'step':            self.step_count,
                 'agent_id':        agent.unique_id,
@@ -1187,11 +1189,12 @@ class ParallelScheduler(Scheduler):
                 'novelty':         normalized_novelty,
                 'interest':        interest,
                 'adopted':         adopted,
-                'source':          'domain_classic',
+                'source':          retrieval_info.get('retrieval_mode', 'domain_classic'),
                 'trigger_novelty': getattr(agent, 'current_novelty', 0.5),
                 'creator_id':      domain_artifact.creator_id,
                 'evaluator_id':    agent.unique_id,
                 'domain_size':     len(self.domain),
+                'domain_mode':     self.domain.mode,
                 **self._artifact_metadata_snapshot(domain_artifact),
             })
 
@@ -1238,11 +1241,23 @@ class ParallelScheduler(Scheduler):
                 source_creator_id = agent.unique_id
             source_type = "hedonic_retreat"
         elif self.domain and random.random() < 0.7:
-            # True boredom: sample domain for fresh inspiration
-            parent_artifact = random.choice(self.domain)
-            parent_expr = parent_artifact.content
-            source_creator_id = parent_artifact.creator_id
-            source_type = "domain_exploration"
+            # True boredom: retrieve from the structured domain
+            query_artifact = self.domain.get(agent.current_artifact_id)
+            parent_artifact, retrieval_info = self.domain.retrieve(
+                query_artifact=query_artifact,
+                query_features=agent.current_features,
+                query_artifact_id=agent.current_artifact_id,
+                mode=self.domain.mode,
+                exclude_artifact_id=agent.current_artifact_id,
+            )
+            if parent_artifact is None:
+                parent_expr = genart.ExpressionNode.create_random(depth=agent.gen_depth)
+                source_creator_id = agent.unique_id
+                source_type = "random_restart"
+            else:
+                parent_expr = parent_artifact.content
+                source_creator_id = parent_artifact.creator_id
+                source_type = retrieval_info.get('retrieval_mode', 'domain_exploration')
         else:
             # Creative restart: generate entirely new expression
             parent_expr = genart.ExpressionNode.create_random(depth=agent.gen_depth)
@@ -1262,6 +1277,24 @@ class ParallelScheduler(Scheduler):
         agent.current_creator_id = source_creator_id
         agent.current_artifact_id = None
         
+        if source_type in {'flat', 'similarity', 'lineage', 'popularity'} and 'parent_artifact' in locals() and parent_artifact is not None:
+            self.logger.log_event('domain_event', {
+                'step': self.step_count,
+                'operation': 'retrieve',
+                'artifact_id': parent_artifact.id,
+                'creator_id': parent_artifact.creator_id,
+                'accepted_by': None,
+                'is_new_artifact': None,
+                'domain_size': len(self.domain),
+                'domain_mode': self.domain.mode,
+                'retrieval_mode': retrieval_info.get('retrieval_mode'),
+                'relevance_score': retrieval_info.get('score'),
+                'query_artifact_id': agent.current_artifact_id,
+                'retrieved_artifact_id': parent_artifact.id,
+                'relation_type': retrieval_info.get('relation_type'),
+                **self._artifact_metadata_snapshot(parent_artifact),
+            })
+
         boredom_artifact = Artifact(
             content=new_expr,
             creator_id=source_creator_id,
@@ -1282,6 +1315,7 @@ class ParallelScheduler(Scheduler):
             'creator_id': source_creator_id,
             'evaluator_id': agent.unique_id,
             'domain_size': len(self.domain),
+            'domain_mode': self.domain.mode,
             **self._artifact_metadata_snapshot(boredom_artifact),
         })
 
@@ -1324,6 +1358,7 @@ class ParallelScheduler(Scheduler):
         self.logger.log_event('step_end', {
             'step': self.step_count,
             'domain_size': len(self.domain),
+            'domain_mode': self.domain.mode,
             'self_threshold': self.self_threshold,
             'domain_threshold': self.domain_threshold,
             'boredom_threshold': self.boredom_threshold,
