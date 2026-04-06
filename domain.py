@@ -9,7 +9,6 @@ organizational interpretations through different retrieval modes:
     - flat       : unstructured archive with random retrieval
     - similarity : feature-space neighborhood retrieval
     - lineage    : ancestry/derivation retrieval
-    - popularity : retrieval guided by social-circulation metadata
 
 The goal is to keep the rest of the simulation stable while making the
 Domain (explicitly) an experimental variable.
@@ -21,7 +20,6 @@ import random
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -36,7 +34,8 @@ class Domain:
     memory is indexed and retrieved.
     """
 
-    VALID_MODES = ("flat", "similarity", "lineage", "popularity")
+    VALID_MODES = ("flat", "similarity", "lineage")
+    VALID_STRATEGIES = ("nearest", "mid", "far")
 
     def __init__(self, mode: str = "flat"):
         if mode not in self.VALID_MODES:
@@ -47,8 +46,6 @@ class Domain:
         self.artifact_ids = set()
         self.artifact_by_id: Dict[int, Artifact] = {}
         self.by_creator = defaultdict(list)
-        self.children_by_parent = defaultdict(list)
-        self.popularity_ranking: Dict[int, float] = {}
 
     def __len__(self) -> int:
         return len(self.artifacts)
@@ -79,16 +76,37 @@ class Domain:
         metadata['domain_source'] = source
         metadata['feature_dims'] = None if artifact.features is None else int(artifact.features.shape[0])
 
+        inherited_path = [int(pid) for pid in metadata.get('domain_lineage_path', []) if pid is not None]
+        inherited_root = metadata.get('domain_lineage_root_id')
+        if inherited_path:
+            metadata['domain_parent_id'] = inherited_path[-1]
+            metadata['domain_lineage_root_id'] = inherited_root if inherited_root is not None else inherited_path[0]
+            metadata['domain_lineage_path'] = inherited_path
+            metadata['domain_lineage_depth'] = max(0, len(inherited_path) - 1)
+        else:
+            metadata['domain_parent_id'] = None
+            metadata['domain_lineage_root_id'] = inherited_root
+            metadata['domain_lineage_path'] = []
+            metadata['domain_lineage_depth'] = 0
+
         root_creator_id = artifact.creator_id
-        parent_depths = []
-        for parent_id in metadata['parent_ids']:
-            parent = self.get(parent_id)
-            if parent is not None:
-                root_creator_id = parent.metadata.get('root_creator_id', root_creator_id)
-                parent_depths.append(int(parent.metadata.get('lineage_depth', 0)))
+        if inherited_path:
+            domain_basis = self.get(inherited_path[-1])
+            if domain_basis is not None:
+                root_creator_id = domain_basis.metadata.get('root_creator_id', root_creator_id)
+        else:
+            parent_depths = []
+            for parent_id in metadata['parent_ids']:
+                parent = self.get(parent_id)
+                if parent is not None:
+                    root_creator_id = parent.metadata.get('root_creator_id', root_creator_id)
+                    parent_depths.append(int(parent.metadata.get('lineage_depth', 0)))
+            metadata['lineage_depth'] = (max(parent_depths) + 1) if parent_depths else (0 if not metadata['parent_ids'] else 1)
+
+        if 'lineage_depth' not in metadata:
+            metadata['lineage_depth'] = 0 if not metadata['parent_ids'] else 1
 
         metadata['root_creator_id'] = root_creator_id
-        metadata['lineage_depth'] = (max(parent_depths) + 1) if parent_depths else (0 if not metadata['parent_ids'] else 1)
         metadata['lineage_signature'] = f"{metadata['root_creator_id']}:{artifact.parent1_id}:{artifact.parent2_id}"
 
         artifact.refresh_popularity_score()
@@ -102,8 +120,24 @@ class Domain:
         Returns:
             (is_new_artifact, popularity_score)
         """
-        self.prepare_artifact(artifact, step=artifact.metadata.get('generation_step', step) or step,
-                              source=artifact.metadata.get('domain_source', 'generation'))
+        self.prepare_artifact(
+            artifact,
+            step=artifact.metadata.get('generation_step', step) or step,
+            source=artifact.metadata.get('domain_source', 'generation'),
+        )
+
+        inherited_path = list(artifact.metadata.get('domain_lineage_path', []))
+        if inherited_path:
+            artifact.metadata['domain_parent_id'] = inherited_path[-1]
+            artifact.metadata['domain_lineage_root_id'] = artifact.metadata.get('domain_lineage_root_id', inherited_path[0])
+            if inherited_path[-1] != artifact.id:
+                artifact.metadata['domain_lineage_path'] = inherited_path + [artifact.id]
+        else:
+            artifact.metadata['domain_parent_id'] = None
+            artifact.metadata['domain_lineage_root_id'] = artifact.id
+            artifact.metadata['domain_lineage_path'] = [artifact.id]
+
+        artifact.metadata['domain_lineage_depth'] = max(0, len(artifact.metadata['domain_lineage_path']) - 1)
 
         is_new = artifact.id not in self.artifact_ids
         if is_new:
@@ -112,13 +146,8 @@ class Domain:
             self.artifact_by_id[artifact.id] = artifact
 
         self.by_creator[artifact.creator_id].append(artifact.id)
-        for parent_id in artifact.metadata.get('parent_ids', []):
-            self.children_by_parent[parent_id].append(artifact.id)
-
         artifact.add_domain_entry(accepted_by, step)
-        artifact.add_like(accepted_by)
         popularity = artifact.refresh_popularity_score()
-        self.popularity_ranking[artifact.id] = popularity
         self.update_similarity_metadata(artifact)
         return is_new, popularity
 
@@ -127,39 +156,83 @@ class Domain:
         if not candidates:
             return None, {'retrieval_mode': 'flat', 'relation_type': 'empty', 'score': None}
         artifact = random.choice(candidates)
-        return artifact, {'retrieval_mode': 'flat', 'relation_type': 'random', 'score': 1.0}
+        return artifact, {
+            'retrieval_mode': 'flat',
+            'relation_type': 'random',
+            'score': 1.0,
+            'strategy': None,
+            'strategy_value': None,
+            'rank': 0,
+            'pool_size': len(candidates),
+            'bucket': 'random',
+            'estimated_novelty': None,
+        }
 
-    def retrieve(self,
-                 query_artifact: Optional[Artifact] = None,
-                 query_features: Optional[torch.Tensor] = None,
-                 query_artifact_id: Optional[int] = None,
-                 mode: Optional[str] = None,
-                 exclude_artifact_id: Optional[int] = None) -> Tuple[Optional[Artifact], Dict[str, object]]:
+    def retrieve(
+        self,
+        query_artifact: Optional[Artifact] = None,
+        query_features: Optional[torch.Tensor] = None,
+        query_artifact_id: Optional[int] = None,
+        mode: Optional[str] = None,
+        exclude_artifact_id: Optional[int] = None,
+        strategy: str = 'nearest',
+        strategy_value: Optional[float] = None,
+        preferred_novelty: Optional[float] = None,
+        current_novelty: Optional[float] = None,
+        query_metadata: Optional[Dict[str, object]] = None,
+    ) -> Tuple[Optional[Artifact], Dict[str, object]]:
         """
         Retrieve one artifact according to the selected domain structure.
         """
         mode = mode or self.mode
+        if mode not in self.VALID_MODES:
+            raise ValueError(f"Unsupported domain mode '{mode}'.")
+        if strategy not in self.VALID_STRATEGIES:
+            raise ValueError(f"Unsupported domain strategy '{strategy}'. Expected one of {self.VALID_STRATEGIES}.")
         if not self.artifacts:
-            return None, {'retrieval_mode': mode, 'relation_type': 'empty', 'score': None}
+            return None, {'retrieval_mode': mode, 'relation_type': 'empty', 'score': None, 'strategy': strategy, 'strategy_value': strategy_value}
 
         if query_artifact is not None:
             query_artifact_id = query_artifact.id
             query_features = query_artifact.features if query_features is None else query_features
+            query_metadata = query_artifact.metadata if query_metadata is None else query_metadata
+
+        exclude_id = exclude_artifact_id if exclude_artifact_id is not None else query_artifact_id
 
         if mode == 'flat':
-            return self.random_artifact(exclude_artifact_id=exclude_artifact_id or query_artifact_id)
-        if mode == 'similarity':
-            return self._retrieve_similarity(query_features=query_features, exclude_artifact_id=exclude_artifact_id or query_artifact_id)
-        if mode == 'lineage':
-            return self._retrieve_lineage(query_artifact_id=query_artifact_id, exclude_artifact_id=exclude_artifact_id)
-        if mode == 'popularity':
-            return self._retrieve_popularity(query_artifact=query_artifact, exclude_artifact_id=exclude_artifact_id or query_artifact_id)
-        raise ValueError(f"Unsupported domain mode '{mode}'.")
+            artifact, info = self.random_artifact(exclude_artifact_id=exclude_id)
+            info['strategy'] = strategy
+            info['strategy_value'] = strategy_value
+            return artifact, info
 
-    def query_related(self,
-                      artifact: Artifact,
-                      k: int = 5,
-                      mode: Optional[str] = None) -> List[Tuple[Artifact, float, str]]:
+        if mode == 'similarity':
+            scored = self._scored_similarity_candidates(query_features=query_features, exclude_artifact_id=exclude_id)
+            return self._select_scored_candidate(
+                scored,
+                retrieval_mode='similarity',
+                fallback_exclude_artifact_id=exclude_id,
+                strategy=strategy,
+                strategy_value=strategy_value,
+                preferred_novelty=preferred_novelty,
+                current_novelty=current_novelty,
+            )
+
+        scored = self._scored_lineage_candidates(
+            query_artifact_id=query_artifact_id,
+            query_metadata=query_metadata,
+            exclude_artifact_id=exclude_id,
+        )
+        return self._select_scored_candidate(
+            scored,
+            retrieval_mode='lineage',
+            fallback_exclude_artifact_id=exclude_id,
+            strategy=strategy,
+            strategy_value=strategy_value,
+            preferred_novelty=preferred_novelty,
+            current_novelty=current_novelty,
+        )
+
+    def query_related(self, artifact: Artifact, k: int = 5, mode: Optional[str] = None) -> List[Tuple[Artifact, float, str]]:
         """
         Return top related artifacts according to the selected structure.
         """
@@ -174,36 +247,12 @@ class Domain:
             return [(a, 1.0, 'random') for a in sample]
 
         if mode == 'similarity':
-            scored = []
-            query = self._normalized_features(artifact.features)
-            if query is None:
-                return []
-            for candidate in candidates:
-                cand = self._normalized_features(candidate.features)
-                if cand is None:
-                    continue
-                score = float(torch.dot(query, cand).item())
-                scored.append((candidate, score, 'feature_neighbor'))
-            scored.sort(key=lambda x: x[1], reverse=True)
-            return scored[:k]
+            scored = self._scored_similarity_candidates(query_features=artifact.features, exclude_artifact_id=exclude_id)
+            return [(cand, score, relation_type) for cand, score, relation_type in scored[:k]]
 
         if mode == 'lineage':
-            lineage_scored = []
-            related_ids = self._lineage_candidate_scores(artifact.id)
-            for candidate_id, (score, relation_type) in related_ids.items():
-                candidate = self.get(candidate_id)
-                if candidate is not None:
-                    lineage_scored.append((candidate, score, relation_type))
-            lineage_scored.sort(key=lambda x: x[1], reverse=True)
-            return lineage_scored[:k]
-
-        if mode == 'popularity':
-            scored = []
-            for candidate in candidates:
-                score, relation_type = self._popularity_relation_score(artifact, candidate)
-                scored.append((candidate, score, relation_type))
-            scored.sort(key=lambda x: x[1], reverse=True)
-            return scored[:k]
+            scored = self._scored_lineage_candidates(query_artifact_id=artifact.id, query_metadata=artifact.metadata, exclude_artifact_id=exclude_id)
+            return [(cand, score, relation_type) for cand, score, relation_type in scored[:k]]
 
         raise ValueError(f"Unsupported domain mode '{mode}'.")
 
@@ -211,19 +260,17 @@ class Domain:
         metadata = artifact.metadata
         metadata['feature_dims'] = None if artifact.features is None else int(artifact.features.shape[0])
 
-        related, info = self._retrieve_similarity(
-            query_features=artifact.features,
-            exclude_artifact_id=artifact.id,
-        )
-        if related is None:
+        scored = self._scored_similarity_candidates(query_features=artifact.features, exclude_artifact_id=artifact.id)
+        if not scored:
             metadata['nearest_domain_artifact_id'] = None
             metadata['nearest_domain_similarity'] = None
             metadata['domain_cluster_hint'] = None
             return
 
+        related, score, relation_type = scored[0]
         metadata['nearest_domain_artifact_id'] = related.id
-        metadata['nearest_domain_similarity'] = info.get('score')
-        metadata['domain_cluster_hint'] = info.get('relation_type') or f"creator_{related.creator_id}"
+        metadata['nearest_domain_similarity'] = score
+        metadata['domain_cluster_hint'] = relation_type or f"creator_{related.creator_id}"
 
     def _normalized_features(self, features: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
         if features is None:
@@ -238,15 +285,16 @@ class Domain:
             return None
         return F.normalize(features, dim=0)
 
-    def _retrieve_similarity(self,
-                             query_features: Optional[torch.Tensor],
-                             exclude_artifact_id: Optional[int] = None) -> Tuple[Optional[Artifact], Dict[str, object]]:
+    def _scored_similarity_candidates(
+        self,
+        query_features: Optional[torch.Tensor],
+        exclude_artifact_id: Optional[int] = None,
+    ) -> List[Tuple[Artifact, float, str]]:
         query = self._normalized_features(query_features)
         if query is None:
-            return self.random_artifact(exclude_artifact_id=exclude_artifact_id)
+            return []
 
-        best_artifact = None
-        best_score = None
+        scored = []
         for artifact in self.artifacts:
             if artifact.id == exclude_artifact_id or artifact.features is None:
                 continue
@@ -254,168 +302,147 @@ class Domain:
             if candidate is None:
                 continue
             score = float(torch.dot(query, candidate).item())
-            if best_score is None or score > best_score:
-                best_score = score
-                best_artifact = artifact
+            scored.append((artifact, score, f"creator_{artifact.creator_id}"))
 
-        if best_artifact is None:
-            return self.random_artifact(exclude_artifact_id=exclude_artifact_id)
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
 
-        return best_artifact, {
-            'retrieval_mode': 'similarity',
-            'relation_type': f"creator_{best_artifact.creator_id}",
-            'score': best_score,
-        }
+    def _lineage_path_from_metadata(self, metadata: Optional[Dict[str, object]]) -> List[int]:
+        if not metadata:
+            return []
+        return [int(pid) for pid in metadata.get('domain_lineage_path', []) if pid is not None]
 
-    def _lineage_ancestors(self, artifact_id: int) -> Dict[int, int]:
-        ancestors = {}
-        queue = [(artifact_id, 0)]
-        visited = {artifact_id}
-        while queue:
-            current_id, depth = queue.pop(0)
-            current = self.get(current_id)
-            if current is None:
+    def _lineage_root_from_metadata(self, metadata: Optional[Dict[str, object]]) -> Optional[int]:
+        path = self._lineage_path_from_metadata(metadata)
+        if path:
+            return path[0]
+        root = metadata.get('domain_lineage_root_id') if metadata else None
+        return None if root is None else int(root)
+
+    def _scored_lineage_candidates(
+        self,
+        query_artifact_id: Optional[int],
+        query_metadata: Optional[Dict[str, object]],
+        exclude_artifact_id: Optional[int] = None,
+    ) -> List[Tuple[Artifact, float, str]]:
+        query = self.get(query_artifact_id) if query_artifact_id is not None else None
+        query_metadata = query.metadata if query is not None else (query_metadata or {})
+
+        query_path = self._lineage_path_from_metadata(query_metadata)
+        query_root = self._lineage_root_from_metadata(query_metadata)
+        query_parent_id = query_metadata.get('domain_parent_id')
+        if query_parent_id is not None:
+            query_parent_id = int(query_parent_id)
+
+        scored: List[Tuple[Artifact, float, str]] = []
+        for candidate in self.artifacts:
+            if candidate.id == exclude_artifact_id:
                 continue
-            for parent_id in current.metadata.get('parent_ids', []):
-                if parent_id in visited:
-                    continue
-                visited.add(parent_id)
-                ancestors[parent_id] = depth + 1
-                queue.append((parent_id, depth + 1))
-        return ancestors
 
-    def _lineage_descendants(self, artifact_id: int) -> Dict[int, int]:
-        descendants = {}
-        queue = [(artifact_id, 0)]
-        visited = {artifact_id}
-        while queue:
-            current_id, depth = queue.pop(0)
-            child_ids = self.children_by_parent.get(current_id, [])
-            for child_id in child_ids:
-                if child_id in visited:
-                    continue
-                visited.add(child_id)
-                descendants[child_id] = depth + 1
-                queue.append((child_id, depth + 1))
-        return descendants
+            cand_metadata = candidate.metadata
+            cand_path = self._lineage_path_from_metadata(cand_metadata)
+            cand_parent_id = cand_metadata.get('domain_parent_id')
+            if cand_parent_id is not None:
+                cand_parent_id = int(cand_parent_id)
+            cand_root = self._lineage_root_from_metadata(cand_metadata)
 
-    def _lineage_candidate_scores(self, artifact_id: Optional[int]) -> Dict[int, Tuple[float, str]]:
-        if artifact_id is None:
-            return {}
-        query = self.get(artifact_id)
-        if query is None:
-            return {}
+            score = None
+            relation_type = None
 
-        scores: Dict[int, Tuple[float, str]] = {}
+            if query_parent_id is not None and candidate.id == query_parent_id:
+                score, relation_type = 1.0, 'parent'
+            elif query_artifact_id is not None and cand_parent_id == query_artifact_id:
+                score, relation_type = 0.95, 'child'
+            elif query_path and candidate.id in query_path[:-1]:
+                idx = query_path.index(candidate.id)
+                depth = len(query_path) - 1 - idx
+                score, relation_type = max(0.2, 0.9 - 0.1 * (depth - 1)), 'ancestor'
+            elif query_artifact_id is not None and cand_path and query_artifact_id in cand_path[:-1]:
+                idx = cand_path.index(query_artifact_id)
+                depth = len(cand_path) - 1 - idx
+                score, relation_type = max(0.2, 0.85 - 0.1 * (depth - 1)), 'descendant'
+            elif query_parent_id is not None and cand_parent_id == query_parent_id:
+                score, relation_type = 0.8, 'sibling'
+            elif query_root is not None and cand_root == query_root:
+                score, relation_type = 0.55, 'same_lineage'
 
-        for parent_id in query.metadata.get('parent_ids', []):
-            if self.contains(parent_id):
-                scores[parent_id] = (1.0, 'parent')
+            if score is not None:
+                scored.append((candidate, float(score), relation_type))
 
-        for child_id in self.children_by_parent.get(artifact_id, []):
-            if self.contains(child_id):
-                prev = scores.get(child_id, (-1.0, 'child'))
-                scores[child_id] = max(prev, (0.95, 'child'), key=lambda x: x[0])
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
 
-        ancestors = self._lineage_ancestors(artifact_id)
-        for ancestor_id, depth in ancestors.items():
-            score = max(0.2, 0.9 - 0.1 * (depth - 1))
-            prev = scores.get(ancestor_id, (-1.0, 'ancestor'))
-            scores[ancestor_id] = max(prev, (score, 'ancestor'), key=lambda x: x[0])
+    def _strategy_target(self, strategy: str, strategy_value: Optional[float]) -> float:
+        if strategy_value is not None:
+            return min(1.0, max(0.0, float(strategy_value)))
+        return {'nearest': 0.0, 'mid': 0.5, 'far': 1.0}[strategy]
 
-        descendants = self._lineage_descendants(artifact_id)
-        for descendant_id, depth in descendants.items():
-            score = max(0.2, 0.85 - 0.1 * (depth - 1))
-            prev = scores.get(descendant_id, (-1.0, 'descendant'))
-            scores[descendant_id] = max(prev, (score, 'descendant'), key=lambda x: x[0])
+    def _bucket_label(self, position: float) -> str:
+        if position <= (1.0 / 3.0):
+            return 'close'
+        if position <= (2.0 / 3.0):
+            return 'moderate'
+        return 'far'
 
-        sibling_ids = set()
-        for parent_id in query.metadata.get('parent_ids', []):
-            sibling_ids.update(self.children_by_parent.get(parent_id, []))
-        sibling_ids.discard(artifact_id)
-        for sibling_id in sibling_ids:
-            prev = scores.get(sibling_id, (-1.0, 'sibling'))
-            scores[sibling_id] = max(prev, (0.8, 'sibling'), key=lambda x: x[0])
-
-        return scores
-
-    def _retrieve_lineage(self,
-                          query_artifact_id: Optional[int],
-                          exclude_artifact_id: Optional[int] = None) -> Tuple[Optional[Artifact], Dict[str, object]]:
-        scores = self._lineage_candidate_scores(query_artifact_id)
-        candidates = []
-        weights = []
-        relations = []
-        for candidate_id, (score, relation_type) in scores.items():
-            if candidate_id == exclude_artifact_id:
-                continue
-            artifact = self.get(candidate_id)
-            if artifact is None:
-                continue
-            candidates.append(artifact)
-            weights.append(max(score, 1e-6))
-            relations.append((score, relation_type))
-
-        if not candidates:
-            artifact, info = self.random_artifact(exclude_artifact_id=exclude_artifact_id or query_artifact_id)
-            info['retrieval_mode'] = 'lineage'
+    def _select_scored_candidate(
+        self,
+        scored: List[Tuple[Artifact, float, str]],
+        retrieval_mode: str,
+        fallback_exclude_artifact_id: Optional[int],
+        strategy: str,
+        strategy_value: Optional[float],
+        preferred_novelty: Optional[float],
+        current_novelty: Optional[float],
+    ) -> Tuple[Optional[Artifact], Dict[str, object]]:
+        if not scored:
+            artifact, info = self.random_artifact(exclude_artifact_id=fallback_exclude_artifact_id)
+            info['retrieval_mode'] = retrieval_mode
             if info.get('relation_type') == 'random':
-                info['relation_type'] = 'lineage_fallback_random'
+                info['relation_type'] = f'{retrieval_mode}_fallback_random'
+            info['strategy'] = strategy
+            info['strategy_value'] = strategy_value
             return artifact, info
 
-        idx = random.choices(range(len(candidates)), weights=weights, k=1)[0]
-        score, relation_type = relations[idx]
-        return candidates[idx], {
-            'retrieval_mode': 'lineage',
+        n = len(scored)
+        target = self._strategy_target(strategy, strategy_value)
+        window = 0.18 if strategy in {'nearest', 'far'} else 0.22
+
+        candidate_indices = []
+        for idx in range(n):
+            position = idx / max(1, n - 1)
+            if abs(position - target) <= window:
+                candidate_indices.append(idx)
+        if not candidate_indices:
+            nearest_idx = min(range(n), key=lambda idx: abs((idx / max(1, n - 1)) - target))
+            candidate_indices = [nearest_idx]
+
+        preferred = 0.5 if preferred_novelty is None else float(preferred_novelty)
+        baseline_gap = None if current_novelty is None else abs(float(current_novelty) - preferred)
+
+        def objective(idx: int):
+            position = idx / max(1, n - 1)
+            predicted_gap = abs(position - preferred)
+            improvement = 0.0 if baseline_gap is None else (baseline_gap - predicted_gap)
+            raw_score = scored[idx][1]
+            return (predicted_gap, abs(position - target), -improvement, -raw_score)
+
+        selected_idx = min(candidate_indices, key=objective)
+        artifact, score, relation_type = scored[selected_idx]
+        position = selected_idx / max(1, n - 1)
+        baseline_gap = None if current_novelty is None else abs(float(current_novelty) - preferred)
+        predicted_gap = abs(position - preferred)
+        motivation_improvement = None if baseline_gap is None else float(baseline_gap - predicted_gap)
+
+        return artifact, {
+            'retrieval_mode': retrieval_mode,
             'relation_type': relation_type,
             'score': float(score),
-        }
-
-    def _audience_overlap(self, left: Artifact, right: Artifact) -> float:
-        left_audience = set(left.metadata.get('viewers', [])) | set(left.metadata.get('liked_by', [])) | set(left.metadata.get('accepted_by', []))
-        right_audience = set(right.metadata.get('viewers', [])) | set(right.metadata.get('liked_by', [])) | set(right.metadata.get('accepted_by', []))
-        if not left_audience or not right_audience:
-            return 0.0
-        union = left_audience | right_audience
-        if not union:
-            return 0.0
-        return len(left_audience & right_audience) / len(union)
-
-    def _popularity_relation_score(self, query_artifact: Optional[Artifact], candidate: Artifact) -> Tuple[float, str]:
-        candidate_popularity = float(candidate.metadata.get('popularity_score', candidate.refresh_popularity_score()))
-        if query_artifact is None:
-            return max(1.0, candidate_popularity + 1.0), 'popular'
-
-        query_popularity = float(query_artifact.metadata.get('popularity_score', query_artifact.refresh_popularity_score()))
-        overlap = self._audience_overlap(query_artifact, candidate)
-        closeness = 1.0 / (1.0 + abs(candidate_popularity - query_popularity))
-        domain_reinforcement = 1.0 + float(candidate.metadata.get('domain_entry_count', 0))
-        score = (2.0 * overlap) + (1.5 * closeness) + (0.2 * domain_reinforcement) + (0.1 * candidate_popularity)
-        relation_type = 'audience_overlap' if overlap > 0 else 'popularity_band'
-        return score, relation_type
-
-    def _retrieve_popularity(self,
-                             query_artifact: Optional[Artifact],
-                             exclude_artifact_id: Optional[int] = None) -> Tuple[Optional[Artifact], Dict[str, object]]:
-        candidates = []
-        weights = []
-        relations = []
-        for artifact in self.artifacts:
-            if artifact.id == exclude_artifact_id:
-                continue
-            score, relation_type = self._popularity_relation_score(query_artifact, artifact)
-            score = max(score, 1e-6)
-            candidates.append(artifact)
-            weights.append(score)
-            relations.append((score, relation_type))
-
-        if not candidates:
-            return None, {'retrieval_mode': 'popularity', 'relation_type': 'empty', 'score': None}
-
-        idx = random.choices(range(len(candidates)), weights=weights, k=1)[0]
-        score, relation_type = relations[idx]
-        return candidates[idx], {
-            'retrieval_mode': 'popularity',
-            'relation_type': relation_type,
-            'score': float(score),
+            'strategy': strategy,
+            'strategy_value': float(target),
+            'rank': int(selected_idx),
+            'pool_size': int(n),
+            'bucket': self._bucket_label(position),
+            'estimated_novelty': float(position),
+            'motivation_gap': float(predicted_gap),
+            'motivation_improvement': motivation_improvement,
         }
