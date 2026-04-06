@@ -185,6 +185,8 @@ class ParallelScheduler(Scheduler):
                  pca_calibration_samples: int = 500, distance_metric: str = 'cosine',
                  boredom_mode: str = 'classic',
                  domain_mode: str = 'flat',
+                 domain_strategy: str = 'nearest',
+                 domain_strategy_value: float = None,
                  save_images: bool = False,
                  image_output_dir: str = None):
         """
@@ -205,6 +207,8 @@ class ParallelScheduler(Scheduler):
         self.distance_metric = distance_metric
         self.boredom_mode = boredom_mode
         self.domain_mode = domain_mode
+        self.domain_strategy = domain_strategy
+        self.domain_strategy_value = domain_strategy_value
         self.save_images = save_images
         self.image_output_dir = image_output_dir
 
@@ -271,7 +275,50 @@ class ParallelScheduler(Scheduler):
             'nearest_domain_artifact_id': metadata.get('nearest_domain_artifact_id'),
             'nearest_domain_similarity': metadata.get('nearest_domain_similarity'),
             'domain_source': metadata.get('domain_source'),
+            'domain_parent_id': metadata.get('domain_parent_id'),
+            'domain_lineage_root_id': metadata.get('domain_lineage_root_id'),
+            'domain_lineage_depth': metadata.get('domain_lineage_depth'),
+            'domain_lineage_path': list(metadata.get('domain_lineage_path', [])),
             'domain_mode': self.domain.mode,
+            'domain_strategy': self.domain_strategy,
+            'domain_strategy_value': self.domain_strategy_value,
+        }
+
+
+    def _agent_domain_query_metadata(self, agent: Agent) -> Dict[str, object]:
+        path = list(getattr(agent, 'current_domain_lineage_path', []) or [])
+        return {
+            'domain_parent_id': path[-1] if path else None,
+            'domain_lineage_root_id': getattr(agent, 'current_domain_lineage_root_id', None),
+            'domain_lineage_depth': max(0, len(path) - 1),
+            'domain_lineage_path': path,
+        }
+
+    def _sync_agent_domain_context(self, agent: Agent, artifact: Optional[Artifact] = None,
+                                   domain_lineage_path: Optional[List[int]] = None,
+                                   domain_lineage_root_id: Optional[int] = None):
+        if artifact is not None:
+            metadata = artifact.metadata
+            path = list(metadata.get('domain_lineage_path', []) or [])
+            root_id = metadata.get('domain_lineage_root_id')
+        else:
+            path = list(domain_lineage_path or [])
+            root_id = domain_lineage_root_id
+        agent.current_domain_lineage_path = path
+        agent.current_domain_lineage_root_id = root_id if root_id is not None else (path[0] if path else None)
+
+    def _retrieval_log_fields(self, retrieval_info: Dict[str, object]) -> Dict[str, object]:
+        return {
+            'domain_strategy': retrieval_info.get('strategy', self.domain_strategy),
+            'domain_strategy_value': retrieval_info.get('strategy_value', self.domain_strategy_value),
+            'retrieval_relation_type': retrieval_info.get('relation_type'),
+            'retrieval_score': retrieval_info.get('score'),
+            'retrieval_rank': retrieval_info.get('rank'),
+            'retrieval_pool_size': retrieval_info.get('pool_size'),
+            'retrieval_bucket': retrieval_info.get('bucket'),
+            'retrieval_estimated_novelty': retrieval_info.get('estimated_novelty'),
+            'retrieval_motivation_gap': retrieval_info.get('motivation_gap'),
+            'retrieval_motivation_improvement': retrieval_info.get('motivation_improvement'),
         }
 
     def _initialize_artifact_metadata(self, artifact: Artifact, source: str = 'generation'):
@@ -283,6 +330,7 @@ class ParallelScheduler(Scheduler):
     def _register_domain_artifact(self, artifact: Artifact, accepted_by: int):
         is_new, popularity = self.domain.add_artifact(artifact, accepted_by=accepted_by, step=self.step_count)
         artifact.metadata['lineage_depth'] = max(artifact.metadata.get('lineage_depth', 0), len(artifact.metadata.get('parent_ids', [])))
+        self._sync_agent_domain_context(self.agents[accepted_by], artifact=artifact)
         self.logger.log_event('domain_event', {
             'step': self.step_count,
             'operation': 'add',
@@ -292,11 +340,19 @@ class ParallelScheduler(Scheduler):
             'is_new_artifact': is_new,
             'domain_size': len(self.domain),
             'domain_mode': self.domain.mode,
+            'domain_strategy': self.domain_strategy,
+            'domain_strategy_value': self.domain_strategy_value,
             'retrieval_mode': self.domain.mode,
             'relevance_score': popularity,
             'query_artifact_id': None,
             'retrieved_artifact_id': artifact.id,
             'relation_type': 'accepted_into_domain',
+            'retrieval_rank': None,
+            'retrieval_pool_size': None,
+            'retrieval_bucket': None,
+            'retrieval_estimated_novelty': None,
+            'retrieval_motivation_gap': None,
+            'retrieval_motivation_improvement': None,
             **self._artifact_metadata_snapshot(artifact),
         })
 
@@ -746,6 +802,7 @@ class ParallelScheduler(Scheduler):
                 recipient.current_features = artifact.features
                 recipient.current_artifact_id = artifact.id
                 recipient.current_creator_id = artifact.creator_id
+                self._sync_agent_domain_context(recipient, artifact=artifact)
 
             # Receiving implies exposure: update recipient memory
             # even when the artifact is not accepted into domain.
@@ -761,7 +818,8 @@ class ParallelScheduler(Scheduler):
                     'id': artifact.id,
                     'expression': artifact.content,
                     'features': artifact.features,
-                    'creator_id': artifact.creator_id
+                    'creator_id': artifact.creator_id,
+                    'metadata': dict(artifact.metadata),
                 })
             
             interaction_results.append({
@@ -781,6 +839,7 @@ class ParallelScheduler(Scheduler):
                 'evaluator_id': recipient.unique_id,
                 'domain_size': len(self.domain),
                 'domain_mode': self.domain.mode,
+                **self._retrieval_log_fields({}),
                 **self._artifact_metadata_snapshot(artifact),
             })
             
@@ -904,7 +963,8 @@ class ParallelScheduler(Scheduler):
                     'id': artifact.id, 
                     'expression': artifact.content, 
                     'features': artifact.features,
-                    'creator_id': artifact.creator_id
+                    'creator_id': artifact.creator_id,
+                    'metadata': dict(artifact.metadata),
                 })
 
             artifact.novelty = normalized_novelty
@@ -921,6 +981,7 @@ class ParallelScheduler(Scheduler):
                 agent.current_interest = interest
                 agent.current_artifact_id = artifact.id
                 agent.current_creator_id = artifact.creator_id
+                self._sync_agent_domain_context(agent, artifact=artifact)
                 adopted = True
 
             # DEVIATION: S_i update ordering.
@@ -942,6 +1003,7 @@ class ParallelScheduler(Scheduler):
                 'evaluator_id': agent.unique_id,
                 'domain_size': len(self.domain),
                 'domain_mode': self.domain.mode,
+                **self._retrieval_log_fields({}),
                 **self._artifact_metadata_snapshot(artifact),
             })
 
@@ -998,8 +1060,13 @@ class ParallelScheduler(Scheduler):
                 query_artifact=query_artifact,
                 query_features=agent.current_features,
                 query_artifact_id=agent.current_artifact_id,
+                query_metadata=self._agent_domain_query_metadata(agent),
                 mode=self.domain.mode,
                 exclude_artifact_id=agent.current_artifact_id,
+                strategy=self.domain_strategy,
+                strategy_value=self.domain_strategy_value,
+                preferred_novelty=agent.preferred_novelty,
+                current_novelty=getattr(agent, 'current_novelty', None),
             )
             if domain_artifact is None:
                 continue
@@ -1163,6 +1230,7 @@ class ParallelScheduler(Scheduler):
                 agent.current_interest    = interest
                 agent.current_artifact_id = domain_artifact.id
                 agent.current_creator_id  = domain_artifact.creator_id
+                self._sync_agent_domain_context(agent, artifact=domain_artifact)
 
             self.logger.log_event('domain_event', {
                 'step': self.step_count,
@@ -1173,11 +1241,14 @@ class ParallelScheduler(Scheduler):
                 'is_new_artifact': None,
                 'domain_size': len(self.domain),
                 'domain_mode': self.domain.mode,
+                'domain_strategy': self.domain_strategy,
+                'domain_strategy_value': self.domain_strategy_value,
                 'retrieval_mode': retrieval_info.get('retrieval_mode'),
                 'relevance_score': retrieval_info.get('score'),
                 'query_artifact_id': agent.current_artifact_id,
                 'retrieved_artifact_id': domain_artifact.id,
                 'relation_type': retrieval_info.get('relation_type'),
+                **self._retrieval_log_fields(retrieval_info),
                 **self._artifact_metadata_snapshot(domain_artifact),
             })
 
@@ -1247,8 +1318,13 @@ class ParallelScheduler(Scheduler):
                 query_artifact=query_artifact,
                 query_features=agent.current_features,
                 query_artifact_id=agent.current_artifact_id,
+                query_metadata=self._agent_domain_query_metadata(agent),
                 mode=self.domain.mode,
                 exclude_artifact_id=agent.current_artifact_id,
+                strategy=self.domain_strategy,
+                strategy_value=self.domain_strategy_value,
+                preferred_novelty=agent.preferred_novelty,
+                current_novelty=getattr(agent, 'current_novelty', None),
             )
             if parent_artifact is None:
                 parent_expr = genart.ExpressionNode.create_random(depth=agent.gen_depth)
@@ -1277,7 +1353,7 @@ class ParallelScheduler(Scheduler):
         agent.current_creator_id = source_creator_id
         agent.current_artifact_id = None
         
-        if source_type in {'flat', 'similarity', 'lineage', 'popularity'} and 'parent_artifact' in locals() and parent_artifact is not None:
+        if source_type in {'flat', 'similarity', 'lineage'} and 'parent_artifact' in locals() and parent_artifact is not None:
             self.logger.log_event('domain_event', {
                 'step': self.step_count,
                 'operation': 'retrieve',
@@ -1287,19 +1363,36 @@ class ParallelScheduler(Scheduler):
                 'is_new_artifact': None,
                 'domain_size': len(self.domain),
                 'domain_mode': self.domain.mode,
+                'domain_strategy': self.domain_strategy,
+                'domain_strategy_value': self.domain_strategy_value,
                 'retrieval_mode': retrieval_info.get('retrieval_mode'),
                 'relevance_score': retrieval_info.get('score'),
                 'query_artifact_id': agent.current_artifact_id,
                 'retrieved_artifact_id': parent_artifact.id,
                 'relation_type': retrieval_info.get('relation_type'),
+                **self._retrieval_log_fields(retrieval_info),
                 **self._artifact_metadata_snapshot(parent_artifact),
             })
+
+        inherited_path = list(parent_artifact.metadata.get('domain_lineage_path', [])) if 'parent_artifact' in locals() and parent_artifact is not None else []
+        inherited_root = parent_artifact.metadata.get('domain_lineage_root_id') if 'parent_artifact' in locals() and parent_artifact is not None else None
+        if inherited_path:
+            self._sync_agent_domain_context(agent, domain_lineage_path=inherited_path, domain_lineage_root_id=inherited_root)
+        else:
+            self._sync_agent_domain_context(agent, domain_lineage_path=[], domain_lineage_root_id=None)
 
         boredom_artifact = Artifact(
             content=new_expr,
             creator_id=source_creator_id,
             producer_id=agent.unique_id,
-            metadata={'domain_source': source_type, 'generation_step': self.step_count}
+            metadata={
+                'domain_source': source_type,
+                'generation_step': self.step_count,
+                'domain_parent_id': inherited_path[-1] if inherited_path else None,
+                'domain_lineage_root_id': inherited_root,
+                'domain_lineage_depth': max(0, len(inherited_path) - 1),
+                'domain_lineage_path': inherited_path,
+            }
         )
         self._initialize_artifact_metadata(boredom_artifact, source=source_type)
         self.logger.log_event('boredom_adoption', {
@@ -1359,6 +1452,8 @@ class ParallelScheduler(Scheduler):
             'step': self.step_count,
             'domain_size': len(self.domain),
             'domain_mode': self.domain.mode,
+            'domain_strategy': self.domain_strategy,
+            'domain_strategy_value': self.domain_strategy_value,
             'self_threshold': self.self_threshold,
             'domain_threshold': self.domain_threshold,
             'boredom_threshold': self.boredom_threshold,
