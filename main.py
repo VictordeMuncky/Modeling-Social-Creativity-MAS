@@ -111,12 +111,20 @@ class ExpressionArtifactGenerator(ArtifactGenerator):
                 new_expr.mutate(rate=self.mutation_rate * 3, max_depth=agent.gen_depth)
 
         origin_creator_id = agent.current_creator_id if agent.current_creator_id is not None else agent.unique_id
+        inherited_domain_path = list(getattr(agent, 'current_domain_lineage_path', []) or [])
+        inherited_domain_root = getattr(agent, 'current_domain_lineage_root_id', None)
         return Artifact(
             content=new_expr,
             creator_id=origin_creator_id,
             parent1_id=parent1_id,
             parent2_id=parent2_id,
-            producer_id=agent.unique_id
+            producer_id=agent.unique_id,
+            metadata={
+                'domain_parent_id': inherited_domain_path[-1] if inherited_domain_path else None,
+                'domain_lineage_root_id': inherited_domain_root,
+                'domain_lineage_depth': max(0, len(inherited_domain_path) - 1),
+                'domain_lineage_path': inherited_domain_path,
+            }
         )
         
     @time_it
@@ -190,9 +198,18 @@ def main():
                         help='DEVIATION(paper 3.4): "classic" matches paper; '
                              '"extended" adds hedonic retreat (experimental, WIP).')
     parser.add_argument('--domain_mode', type=str, default='flat',
-                        choices=['flat', 'similarity', 'lineage', 'popularity'],
+                        choices=['flat', 'similarity', 'lineage'],
                         help='Domain retrieval/indexing mode. "flat" preserves the baseline '
                              'archive behavior as closely as possible.')
+    parser.add_argument('--domain_strategy', type=str, default='nearest',
+                        choices=['nearest', 'mid', 'far'],
+                        help='How agents navigate structured domain memory. '
+                             '"nearest" favors close relations, "mid" favors moderate relations, '
+                             'and "far" favors distant relations.')
+    parser.add_argument('--domain_strategy_value', type=float, default=None,
+                        help='Optional continuous strategy position in [0,1]. '
+                             '0 = closest available, 0.5 = moderate, 1 = farthest available. '
+                             'Overrides the categorical default when set.')
     parser.add_argument('--save_images', action='store_true',
                         help='Save rendered artifact PNGs (debug).')
     parser.add_argument('--image_output_dir', type=str, default=None,
@@ -234,7 +251,11 @@ def main():
         'root_creator_id', 'lineage_depth', 'generation_step', 'entered_domain_step',
         'views', 'shares', 'likes', 'domain_entry_count', 'popularity_score',
         'nearest_domain_artifact_id', 'nearest_domain_similarity', 'domain_source',
-        'domain_mode'
+        'domain_parent_id', 'domain_lineage_root_id', 'domain_lineage_depth', 'domain_lineage_path',
+        'domain_mode', 'domain_strategy', 'domain_strategy_value',
+        'retrieval_relation_type', 'retrieval_score', 'retrieval_rank', 'retrieval_pool_size',
+        'retrieval_bucket', 'retrieval_estimated_novelty', 'retrieval_motivation_gap',
+        'retrieval_motivation_improvement'
     ]
     csv_logger = CSVLogger(
         log_file_path=csv_log_file, 
@@ -267,12 +288,15 @@ def main():
     # --- Domain Observability Logger Setup ---
     domain_log_file = os.path.join(log_dir, "domain.csv")
     domain_log_fields = [
-        'timestamp', 'event_type', 'step', 'operation', 'domain_mode', 'retrieval_mode',
-        'query_artifact_id', 'retrieved_artifact_id', 'artifact_id', 'creator_id', 'accepted_by',
+        'timestamp', 'event_type', 'step', 'operation', 'domain_mode', 'domain_strategy', 'domain_strategy_value',
+        'retrieval_mode', 'query_artifact_id', 'retrieved_artifact_id', 'artifact_id', 'creator_id', 'accepted_by',
         'relation_type', 'relevance_score', 'is_new_artifact', 'domain_size',
+        'retrieval_rank', 'retrieval_pool_size', 'retrieval_bucket', 'retrieval_estimated_novelty',
+        'retrieval_motivation_gap', 'retrieval_motivation_improvement',
         'root_creator_id', 'lineage_depth', 'generation_step', 'entered_domain_step',
         'views', 'shares', 'likes', 'domain_entry_count', 'popularity_score',
-        'nearest_domain_artifact_id', 'nearest_domain_similarity', 'domain_source'
+        'nearest_domain_artifact_id', 'nearest_domain_similarity', 'domain_source',
+        'domain_parent_id', 'domain_lineage_root_id', 'domain_lineage_depth', 'domain_lineage_path'
     ]
     domain_logger = CSVLogger(
         log_file_path=domain_log_file,
@@ -309,6 +333,8 @@ def main():
             distance_metric=args.distance_metric,
             boredom_mode=args.boredom_mode,
             domain_mode=args.domain_mode,
+            domain_strategy=args.domain_strategy,
+            domain_strategy_value=args.domain_strategy_value,
             save_images=args.save_images,
             image_output_dir=image_output_dir
     )
@@ -317,6 +343,7 @@ def main():
     print(f"Sharing with {share_count} agents. Uniform novelty: {uniform_novelty_pref}")
     print(f"Mutation rate: {mutation_rate}")
     print(f"Domain mode: {args.domain_mode}")
+    print(f"Domain strategy: {args.domain_strategy} (value={args.domain_strategy_value})")
     print(f"Using static noise: {use_static_noise}")
     print(f"Logs will be saved in: {log_dir}")
     
