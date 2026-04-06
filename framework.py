@@ -74,6 +74,10 @@ class Artifact:
             'domain_cluster_hint': None,
             'domain_source': 'generation',
             'lineage_signature': f"{creator_id}:{parent1_id}:{parent2_id}",
+            'domain_parent_id': None,
+            'domain_lineage_root_id': None,
+            'domain_lineage_depth': 0,
+            'domain_lineage_path': [],
         }
         if metadata:
             base_metadata.update(metadata)
@@ -176,6 +180,8 @@ class Agent:
     current_artifact_id: Optional[int] = None
     current_creator_id: Optional[int] = None
     current_interest: float = -1.0 
+    current_domain_lineage_path: List[int] = field(default_factory=list)
+    current_domain_lineage_root_id: Optional[int] = None
     # Personal artifact memory for breeding partners (3.2.2)
     # Capped to prevent unbounded growth; only recent artifacts
     # matter for breeding selection and uniqueness checks.
