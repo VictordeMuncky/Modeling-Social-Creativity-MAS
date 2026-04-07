@@ -185,6 +185,8 @@ class ParallelScheduler(Scheduler):
                  pca_calibration_samples: int = 500, distance_metric: str = 'cosine',
                  boredom_mode: str = 'classic',
                  domain_mode: str = 'flat',
+                 domain_strategy: str = 'nearest',
+                 domain_strategy_value: Optional[float] = None,
                  save_images: bool = False,
                  image_output_dir: str = None):
         """
@@ -205,6 +207,8 @@ class ParallelScheduler(Scheduler):
         self.distance_metric = distance_metric
         self.boredom_mode = boredom_mode
         self.domain_mode = domain_mode
+        self.domain_strategy = domain_strategy
+        self.domain_strategy_value = domain_strategy_value
         self.save_images = save_images
         self.image_output_dir = image_output_dir
 
