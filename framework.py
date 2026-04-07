@@ -21,9 +21,9 @@ class Artifact:
     Represents a generated creative artifact.
 
     An artifact is the fundamental unit of exchange and evaluation in the system.
-    Besides expression content and feature vectors, it now also carries a
-    metadata dictionary that can support richer domain structures such as
-    similarity-based neighborhoods, lineage graphs, and popularity signals.
+    Besides expression content and feature vectors, it carries a
+    metadata dictionary that supports lightweight domain experiments such as
+    similarity neighborhoods and lineage links.
 
     The metadata layer is intentionally generic: the base simulation can ignore
     it, while downstream experiments can build alternative domain structures on
@@ -64,10 +64,6 @@ class Artifact:
             'viewers': [],
             'shares': 0,
             'share_pairs': [],
-            'likes': 0,
-            'liked_by': [],
-            'accepted_by': [],
-            'popularity_score': 0.0,
             'feature_dims': None,
             'nearest_domain_artifact_id': None,
             'nearest_domain_similarity': None,
@@ -75,9 +71,6 @@ class Artifact:
             'domain_source': 'generation',
             'lineage_signature': f"{creator_id}:{parent1_id}:{parent2_id}",
             'domain_parent_id': None,
-            'domain_lineage_root_id': None,
-            'domain_lineage_depth': 0,
-            'domain_lineage_path': [],
         }
         if metadata:
             base_metadata.update(metadata)
@@ -99,16 +92,7 @@ class Artifact:
         })
         self.metadata['share_pairs'] = pairs
 
-    def add_like(self, agent_id: int):
-        likes = set(self.metadata.get('liked_by', []))
-        likes.add(int(agent_id))
-        self.metadata['liked_by'] = sorted(likes)
-        self.metadata['likes'] = len(self.metadata['liked_by'])
-
     def add_domain_entry(self, agent_id: int, step: Optional[int] = None):
-        accepted_by = set(self.metadata.get('accepted_by', []))
-        accepted_by.add(int(agent_id))
-        self.metadata['accepted_by'] = sorted(accepted_by)
         history = list(self.metadata.get('domain_entry_history', []))
         history.append({'step': step, 'agent_id': int(agent_id)})
         self.metadata['domain_entry_history'] = history
@@ -116,14 +100,6 @@ class Artifact:
         if self.metadata.get('entered_domain_step') is None:
             self.metadata['entered_domain_step'] = step
 
-    def refresh_popularity_score(self):
-        self.metadata['popularity_score'] = float(
-            self.metadata.get('views', 0)
-            + 2 * self.metadata.get('shares', 0)
-            + 3 * self.metadata.get('likes', 0)
-            + 4 * len(self.metadata.get('accepted_by', []))
-        )
-        return self.metadata['popularity_score']
 
 class ArtifactGenerator(abc.ABC):
     """
@@ -180,8 +156,7 @@ class Agent:
     current_artifact_id: Optional[int] = None
     current_creator_id: Optional[int] = None
     current_interest: float = -1.0 
-    current_domain_lineage_path: List[int] = field(default_factory=list)
-    current_domain_lineage_root_id: Optional[int] = None
+    current_domain_parent_id: Optional[int] = None
     # Personal artifact memory for breeding partners (3.2.2)
     # Capped to prevent unbounded growth; only recent artifacts
     # matter for breeding selection and uniqueness checks.
