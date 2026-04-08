@@ -36,6 +36,8 @@ class Domain:
 
     VALID_MODES = ("flat", "similarity", "lineage")
     VALID_STRATEGIES = ("nearest", "mid", "far")
+    VALID_SELECTION_POLICIES = ("simple", "novelty_match")
+    STRATEGY_WINDOW = 0.15
 
     def __init__(self, mode: str = "flat"):
         if mode not in self.VALID_MODES:
@@ -123,13 +125,15 @@ class Domain:
                 'score': None,
                 'strategy': None,
                 'strategy_value': None,
+                'selection_policy': None,
                 'rank': None,
                 'pool_size': 0,
                 'bucket': None,
                 'estimated_novelty': None,
                 'motivation_gap': None,
-                'motivation_improvement': None,
+                'fallback_random': False,
             }
+
         artifact = random.choice(candidates)
         return artifact, {
             'retrieval_mode': 'flat',
@@ -137,12 +141,13 @@ class Domain:
             'score': 1.0,
             'strategy': None,
             'strategy_value': None,
+            'selection_policy': None,
             'rank': 0,
             'pool_size': len(candidates),
             'bucket': 'random',
             'estimated_novelty': None,
             'motivation_gap': None,
-            'motivation_improvement': None,
+            'fallback_random': False,
         }
 
     def retrieve(
@@ -155,17 +160,32 @@ class Domain:
         exclude_artifact_id: Optional[int] = None,
         strategy: str = 'nearest',
         strategy_value: Optional[float] = None,
+        selection_policy: str = 'simple',
         preferred_novelty: Optional[float] = None,
-        current_novelty: Optional[float] = None,
     ) -> Tuple[Optional[Artifact], Dict[str, object]]:
         """Retrieve one artifact according to the selected domain structure."""
         mode = mode or self.mode
+
         if mode not in self.VALID_MODES:
             raise ValueError(f"Unsupported domain mode '{mode}'.")
         if strategy not in self.VALID_STRATEGIES:
             raise ValueError(f"Unsupported domain strategy '{strategy}'. Expected one of {self.VALID_STRATEGIES}.")
+        if selection_policy not in self.VALID_SELECTION_POLICIES:
+            raise ValueError(
+                f"Unsupported selection policy '{selection_policy}'. "
+                f"Expected one of {self.VALID_SELECTION_POLICIES}."
+            )
+
         if not self.artifacts:
-            return None, {'retrieval_mode': mode, 'relation_type': 'empty', 'score': None, 'strategy': strategy, 'strategy_value': strategy_value}
+            return None, {
+                'retrieval_mode': mode,
+                'relation_type': 'empty',
+                'score': None,
+                'strategy': strategy,
+                'strategy_value': strategy_value,
+                'selection_policy': selection_policy,
+                'fallback_random': False,
+            }
 
         if query_artifact is not None:
             query_artifact_id = query_artifact.id
@@ -178,10 +198,14 @@ class Domain:
             artifact, info = self.random_artifact(exclude_artifact_id=exclude_id)
             info['strategy'] = strategy
             info['strategy_value'] = strategy_value
+            info['selection_policy'] = selection_policy
             return artifact, info
 
         if mode == 'similarity':
-            scored = self._scored_similarity_candidates(query_features=query_features, exclude_artifact_id=exclude_id)
+            scored = self._scored_similarity_candidates(
+                query_features=query_features,
+                exclude_artifact_id=exclude_id,
+            )
         else:
             scored = self._scored_lineage_candidates(
                 query_artifact_id=query_artifact_id,
@@ -195,10 +219,9 @@ class Domain:
             fallback_exclude_artifact_id=exclude_id,
             strategy=strategy,
             strategy_value=strategy_value,
+            selection_policy=selection_policy,
             preferred_novelty=preferred_novelty,
-            current_novelty=current_novelty,
         )
-
     def query_related(self, artifact: Artifact, k: int = 5, mode: Optional[str] = None) -> List[Tuple[Artifact, float, str]]:
         """Return top related artifacts according to the selected structure."""
         mode = mode or self.mode
@@ -356,8 +379,8 @@ class Domain:
         fallback_exclude_artifact_id: Optional[int],
         strategy: str,
         strategy_value: Optional[float],
+        selection_policy: str,
         preferred_novelty: Optional[float],
-        current_novelty: Optional[float],
     ) -> Tuple[Optional[Artifact], Dict[str, object]]:
         if not scored:
             artifact, info = self.random_artifact(exclude_artifact_id=fallback_exclude_artifact_id)
@@ -366,36 +389,47 @@ class Domain:
                 info['relation_type'] = f'{retrieval_mode}_fallback_random'
             info['strategy'] = strategy
             info['strategy_value'] = strategy_value
+            info['selection_policy'] = selection_policy
+            info['fallback_random'] = True
             return artifact, info
 
         n = len(scored)
         target = self._strategy_target(strategy, strategy_value)
-        window = 0.18 if strategy in {'nearest', 'far'} else 0.22
+        window = self.STRATEGY_WINDOW
 
         candidate_indices = []
         for idx in range(n):
             position = idx / max(1, n - 1)
             if abs(position - target) <= window:
                 candidate_indices.append(idx)
+
         if not candidate_indices:
             nearest_idx = min(range(n), key=lambda idx: abs((idx / max(1, n - 1)) - target))
             candidate_indices = [nearest_idx]
 
-        preferred = 0.5 if preferred_novelty is None else float(preferred_novelty)
-        baseline_gap = None if current_novelty is None else abs(float(current_novelty) - preferred)
+        if selection_policy == 'simple':
+            selected_idx = random.choice(candidate_indices)
+            motivation_gap = None
+        elif selection_policy == 'novelty_match':
+            preferred = 0.5 if preferred_novelty is None else float(preferred_novelty)
 
-        def objective(idx: int):
-            position = idx / max(1, n - 1)
-            predicted_gap = abs(position - preferred)
-            improvement = 0.0 if baseline_gap is None else (baseline_gap - predicted_gap)
-            raw_score = scored[idx][1]
-            return (predicted_gap, abs(position - target), -improvement, -raw_score)
+            def objective(idx: int):
+                position = idx / max(1, n - 1)
+                raw_score = scored[idx][1]
+                return (
+                    abs(position - preferred),
+                    abs(position - target),
+                    -raw_score,
+                )
 
-        selected_idx = min(candidate_indices, key=objective)
+            selected_idx = min(candidate_indices, key=objective)
+            position = selected_idx / max(1, n - 1)
+            motivation_gap = abs(position - preferred)
+        else:
+            raise ValueError(f"Unsupported selection policy '{selection_policy}'.")
+
         artifact, score, relation_type = scored[selected_idx]
         position = selected_idx / max(1, n - 1)
-        predicted_gap = abs(position - preferred)
-        motivation_improvement = None if baseline_gap is None else float(baseline_gap - predicted_gap)
 
         return artifact, {
             'retrieval_mode': retrieval_mode,
@@ -403,10 +437,12 @@ class Domain:
             'score': float(score),
             'strategy': strategy,
             'strategy_value': float(target),
+            'selection_policy': selection_policy,
             'rank': int(selected_idx),
             'pool_size': int(n),
             'bucket': self._bucket_label(position),
             'estimated_novelty': float(position),
-            'motivation_gap': float(predicted_gap),
-            'motivation_improvement': motivation_improvement,
+            'motivation_gap': None if selection_policy == 'simple' else float(motivation_gap),
+            'fallback_random': False,
         }
+

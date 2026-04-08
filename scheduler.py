@@ -187,6 +187,7 @@ class ParallelScheduler(Scheduler):
                  domain_mode: str = 'flat',
                  domain_strategy: str = 'nearest',
                  domain_strategy_value: Optional[float] = None,
+                 domain_selection_policy: str = 'simple',
                  save_images: bool = False,
                  image_output_dir: str = None):
         """
@@ -209,6 +210,7 @@ class ParallelScheduler(Scheduler):
         self.domain_mode = domain_mode
         self.domain_strategy = domain_strategy
         self.domain_strategy_value = domain_strategy_value
+        self.domain_selection_policy = domain_selection_policy
         self.save_images = save_images
         self.image_output_dir = image_output_dir
 
@@ -277,6 +279,7 @@ class ParallelScheduler(Scheduler):
             'domain_mode': self.domain.mode,
             'domain_strategy': self.domain_strategy,
             'domain_strategy_value': self.domain_strategy_value,
+            'domain_selection_policy': self.domain_selection_policy,
         }
 
     def _agent_domain_query_metadata(self, agent: Agent) -> Dict[str, object]:
@@ -299,6 +302,7 @@ class ParallelScheduler(Scheduler):
         return {
             'domain_strategy': retrieval_info.get('strategy', self.domain_strategy),
             'domain_strategy_value': retrieval_info.get('strategy_value', self.domain_strategy_value),
+            'domain_selection_policy': retrieval_info.get('selection_policy', self.domain_selection_policy),
             'retrieval_relation_type': retrieval_info.get('relation_type'),
             'retrieval_score': retrieval_info.get('score'),
             'retrieval_rank': retrieval_info.get('rank'),
@@ -307,6 +311,7 @@ class ParallelScheduler(Scheduler):
             'retrieval_estimated_novelty': retrieval_info.get('estimated_novelty'),
             'retrieval_motivation_gap': retrieval_info.get('motivation_gap'),
             'retrieval_motivation_improvement': retrieval_info.get('motivation_improvement'),
+            'retrieval_fallback_random': retrieval_info.get('fallback_random', False),
         }
 
     def _initialize_artifact_metadata(self, artifact: Artifact, source: str = 'generation'):
@@ -1048,8 +1053,8 @@ class ParallelScheduler(Scheduler):
                 exclude_artifact_id=agent.current_artifact_id,
                 strategy=self.domain_strategy,
                 strategy_value=self.domain_strategy_value,
+                selection_policy=self.domain_selection_policy,
                 preferred_novelty=agent.preferred_novelty,
-                current_novelty=getattr(agent, 'current_novelty', None),
             )
             if domain_artifact is None:
                 continue
@@ -1312,8 +1317,8 @@ class ParallelScheduler(Scheduler):
                 exclude_artifact_id=agent.current_artifact_id,
                 strategy=self.domain_strategy,
                 strategy_value=self.domain_strategy_value,
+                selection_policy=self.domain_selection_policy,
                 preferred_novelty=agent.preferred_novelty,
-                current_novelty=getattr(agent, 'current_novelty', None),
             )
             if parent_artifact is None:
                 parent_expr = genart.ExpressionNode.create_random(depth=agent.gen_depth)

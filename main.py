@@ -204,6 +204,11 @@ def main():
     parser.add_argument('--domain_strategy_value', type=float, default=None,
                         help='Optional continuous strategy position in [0,1]. '
                              '0 = closest available, 0.5 = moderate, 1 = farthest available.')
+    parser.add_argument('--domain_selection_policy', type=str, default='simple',
+                        choices=['simple', 'novelty_match'],
+                        help='How to choose within the selected near/mid/far region. '
+                            'simple = random pick inside region; '
+                            'novelty_match = pick the artifact whose region position best matches preferred novelty.')
     parser.add_argument('--save_images', action='store_true',
                         help='Save rendered artifact PNGs (debug).')
     parser.add_argument('--image_output_dir', type=str, default=None,
@@ -245,9 +250,9 @@ def main():
         'root_creator_id', 'lineage_depth', 'generation_step', 'entered_domain_step',
         'views', 'shares', 'domain_entry_count',
         'nearest_domain_artifact_id', 'nearest_domain_similarity', 'domain_source', 'domain_parent_id',
-        'domain_mode', 'domain_strategy', 'domain_strategy_value',
+        'domain_mode', 'domain_strategy', 'domain_strategy_value', 'domain_selection_policy', 
         'retrieval_relation_type', 'retrieval_score', 'retrieval_rank', 'retrieval_pool_size',
-        'retrieval_bucket', 'retrieval_estimated_novelty', 'retrieval_motivation_gap', 'retrieval_motivation_improvement'
+        'retrieval_bucket', 'retrieval_estimated_novelty', 'retrieval_motivation_gap', 'retrieval_fallback_random', 'retrieval_motivation_improvement'
     ]
     csv_logger = CSVLogger(
         log_file_path=csv_log_file, 
@@ -280,11 +285,11 @@ def main():
     # --- Domain Observability Logger Setup ---
     domain_log_file = os.path.join(log_dir, "domain.csv")
     domain_log_fields = [
-        'timestamp', 'event_type', 'step', 'operation', 'domain_mode', 'domain_strategy', 'domain_strategy_value',
+        'timestamp', 'event_type', 'step', 'operation', 'domain_mode', 'domain_strategy', 'domain_strategy_value', 'domain_selection_policy', 
         'retrieval_mode', 'query_artifact_id', 'retrieved_artifact_id', 'artifact_id', 'creator_id', 'accepted_by',
         'relation_type', 'relevance_score', 'is_new_artifact', 'domain_size',
         'retrieval_rank', 'retrieval_pool_size', 'retrieval_bucket', 'retrieval_estimated_novelty',
-        'retrieval_motivation_gap', 'retrieval_motivation_improvement',
+        'retrieval_motivation_gap', 'retrieval_fallback_random', 'retrieval_motivation_improvement',
         'root_creator_id', 'lineage_depth', 'generation_step', 'entered_domain_step',
         'views', 'shares', 'domain_entry_count',
         'nearest_domain_artifact_id', 'nearest_domain_similarity', 'domain_source', 'domain_parent_id'
@@ -326,6 +331,7 @@ def main():
             domain_mode=args.domain_mode,
             domain_strategy=args.domain_strategy,
             domain_strategy_value=args.domain_strategy_value,
+            domain_selection_policy=args.domain_selection_policy,
             save_images=args.save_images,
             image_output_dir=image_output_dir
     )
@@ -335,6 +341,7 @@ def main():
     print(f"Mutation rate: {mutation_rate}")
     print(f"Domain mode: {args.domain_mode}")
     print(f"Domain strategy: {args.domain_strategy} (value={args.domain_strategy_value})")
+    print(f"Domain selection policy: {args.domain_selection_policy}")
     print(f"Using static noise: {use_static_noise}")
     print(f"Logs will be saved in: {log_dir}")
     
