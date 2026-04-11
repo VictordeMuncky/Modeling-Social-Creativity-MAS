@@ -189,7 +189,8 @@ class ParallelScheduler(Scheduler):
                  domain_strategy_value: Optional[float] = None,
                  domain_selection_policy: str = 'simple',
                  save_images: bool = False,
-                 image_output_dir: str = None):
+                 image_output_dir: str = None,
+                 agent_lifespan: int = 0):
         """
         Initializes the ParallelScheduler.
 
@@ -213,6 +214,7 @@ class ParallelScheduler(Scheduler):
         self.domain_selection_policy = domain_selection_policy
         self.save_images = save_images
         self.image_output_dir = image_output_dir
+        self.agent_lifespan = agent_lifespan
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.gpu_stream = torch.cuda.Stream() if self.device.type == 'cuda' else None
@@ -248,7 +250,11 @@ class ParallelScheduler(Scheduler):
             self.feature_extractor = _feature_extractor.to(self.device)
 
         self.agents: List[Agent] = self._initialize_agents()
+        self.agent_map = {agent.unique_id: agent for agent in self.agents}
+        self.agent_id_to_index = {agent.unique_id: idx for idx, agent in enumerate(self.agents)}
 
+        # Counter for unique IDs when replacing agents (lifespan mechanism)
+        self.next_agent_id = self.num_agents
         # Domain: shared cultural-memory object.
         # The same stored artifacts can be retrieved through different
         # structural interpretations without changing the rest of the loop.
@@ -287,6 +293,20 @@ class ParallelScheduler(Scheduler):
             'domain_parent_id': getattr(agent, 'current_domain_parent_id', None),
         }
 
+    def _refresh_agent_index_map(self):
+        self.agent_map = {agent.unique_id: agent for agent in self.agents}
+        self.agent_id_to_index = {agent.unique_id: idx for idx, agent in enumerate(self.agents)}
+
+    def _get_agent_by_id(self, agent_id: Optional[int]) -> Optional[Agent]:
+        if agent_id is None:
+            return None
+        return self.agent_map.get(agent_id)
+
+    def _get_agent_index(self, agent_id: Optional[int]) -> Optional[int]:
+        if agent_id is None:
+            return None
+        return self.agent_id_to_index.get(agent_id)
+
     def _sync_agent_domain_context(self, agent: Agent, artifact: Optional[Artifact] = None,
                                    domain_parent_id: Optional[int] = None):
         if artifact is not None:
@@ -323,7 +343,9 @@ class ParallelScheduler(Scheduler):
     def _register_domain_artifact(self, artifact: Artifact, accepted_by: int):
         is_new = self.domain.add_artifact(artifact, accepted_by=accepted_by, step=self.step_count)
         artifact.metadata['lineage_depth'] = max(artifact.metadata.get('lineage_depth', 0), len(artifact.metadata.get('parent_ids', [])))
-        self._sync_agent_domain_context(self.agents[accepted_by], artifact=artifact)
+        accepted_agent = self._get_agent_by_id(accepted_by)
+        if accepted_agent is not None:
+            self._sync_agent_domain_context(accepted_agent, artifact=artifact)
         self.logger.log_event('domain_event', {
             'step': self.step_count,
             'operation': 'add',
@@ -406,7 +428,8 @@ class ParallelScheduler(Scheduler):
                 knn=kNN(agent_id=i, max_size=1000),
                 wundt=wundt,
                 gen_depth=np.random.randint(4, 6),
-                preferred_novelty=preferred_novelty
+                preferred_novelty=preferred_novelty,
+                lifespan=self.agent_lifespan
             )
 
             # Initialize new attributes for tracking stats
@@ -548,6 +571,103 @@ class ParallelScheduler(Scheduler):
             agent.current_interest = refreshed_interest
             agent.current_novelty = normalized_novelty
 
+    def _create_replacement_agent(self, slot_index: int) -> Agent:
+        """
+        Creates a fresh agent to replace one that has reached its lifespan.
+
+        The new agent is initialized identically to how agents are created
+        in _initialize_agents: new random novelty preference, empty kNN
+        memory, fresh Wundt curve, and reset state. It receives a globally
+        unique ID (never reused) to preserve lineage tracking integrity.
+
+        Args:
+            slot_index: The index in self.agents where this agent will live.
+
+        Returns:
+            A fully initialized Agent ready to participate in the simulation.
+        """
+        new_id = self.next_agent_id
+        self.next_agent_id += 1
+
+        if self.uniform_novelty_pref:
+            preferred_novelty = 0.5
+        else:
+            preferred_novelty = np.clip(np.random.normal(0.5, 0.155), 0, 1)
+
+        wundt = WundtCurve(
+            reward_mean=max(0.1, preferred_novelty - 0.2),
+            reward_std=0.15,
+            punish_mean=min(0.9, preferred_novelty + 0.2),
+            punish_std=0.15,
+            alpha=1.2
+        )
+
+        agent = Agent(
+            unique_id=new_id,
+            knn=kNN(agent_id=new_id, max_size=1000),
+            wundt=wundt,
+            gen_depth=np.random.randint(4, 6),
+            preferred_novelty=preferred_novelty,
+            lifespan=self.agent_lifespan
+        )
+
+        # Initialize tracking stats (same as _initialize_agents)
+        agent.num_self_evals = 0
+        agent.num_other_evals = 0
+        agent.num_shares = 0
+        agent.num_domain_adoptions = 0
+        agent.total_novelty_generated = 0.0
+        agent.total_interest_generated = 0.0
+
+        # Log the new agent's initialization
+        self.logger.log_event('agent_init', {
+            'agent_id': agent.unique_id,
+            'preferred_novelty': agent.preferred_novelty,
+            'reward_mean': agent.wundt.reward_mean,
+            'punishment_mean': agent.wundt.punish_mean
+        })
+
+        return agent
+
+    @time_it
+    def _lifespan_phase(self):
+        """
+        Checks all agents for lifespan expiry and replaces expired ones.
+
+        Called at the end of each step (after thresholds update). When an
+        agent's age reaches its lifespan, it is logged as dead, replaced
+        with a fresh agent, and the replacement is logged as born.
+
+        This phase is a no-op when agent_lifespan == 0 (disabled).
+        """
+        if self.agent_lifespan <= 0:
+            return
+
+        for idx, agent in enumerate(self.agents):
+            agent.age += 1
+
+            if agent.age >= agent.lifespan:
+                # Log death
+                self.logger.log_event('agent_death', {
+                    'step': self.step_count,
+                    'agent_id': agent.unique_id,
+                    'age': agent.age,
+                    'event_type': 'agent_death',
+                })
+
+                # Create replacement
+                new_agent = self._create_replacement_agent(idx)
+                self.agents[idx] = new_agent
+                self._refresh_agent_index_map()
+
+                # Log birth
+                self.logger.log_event('agent_birth', {
+                    'step': self.step_count,
+                    'agent_id': new_agent.unique_id,
+                    'preferred_novelty': new_agent.preferred_novelty,
+                    'event_type': 'agent_birth',
+                })
+
     @time_it
     def step(self):
         """
@@ -567,6 +687,7 @@ class ParallelScheduler(Scheduler):
           5. Receive eval → interaction_phase()
           6. Boredom      → boredom_phase()
           7. Thresholds   → update_system_thresholds()
+          8. Lifespan     → _lifespan_phase() (if enabled)
         """
         self.refresh_current_interest_phase()
         generated_artifacts = self.generation_phase()
@@ -579,6 +700,7 @@ class ParallelScheduler(Scheduler):
             self.boredom_phase()
             
         self.update_system_thresholds()
+        self._lifespan_phase()
         
         self._log_step_metrics(interaction_results)
         self.step_count += 1
@@ -666,13 +788,14 @@ class ParallelScheduler(Scheduler):
                 num_recipients = min(self.share_count, self.num_agents - 1)
                 if num_recipients <= 0: continue
                 
-                recipients = random.sample([a.unique_id for a in self.agents if a.unique_id != agent.unique_id], k=num_recipients)
+                recipients = random.sample([idx for idx, a in enumerate(self.agents) if a.unique_id != agent.unique_id], k=num_recipients)
                 
-                for recipient_id in recipients:
+                for recipient_idx in recipients:
                     messages.append({
                         'artifact': just_generated,
                         'sender_id': agent.unique_id,
-                        'recipient_id': recipient_id
+                        'recipient_id': self.agents[recipient_idx].unique_id,
+                        'recipient_index': recipient_idx,
                     })
         return messages
 
@@ -721,7 +844,7 @@ class ParallelScheduler(Scheduler):
                 agent_ks[i] = agent.knn.k
 
             # Map messages to recipient agent IDs for batch processing
-            message_to_agent_map = torch.tensor([msg['recipient_id'] for msg in messages], device=self.device, dtype=torch.long)
+            message_to_agent_map = torch.tensor([msg['recipient_index'] for msg in messages], device=self.device, dtype=torch.long)
 
             if self.multi_gpu and query_batch.shape[0] > 1:
                 novelty_scores_tensor = self._parallel_apply_custom(
@@ -746,7 +869,7 @@ class ParallelScheduler(Scheduler):
         interaction_results = []
         
         for i, message in enumerate(messages):
-            recipient = self.agents[message['recipient_id']]
+            recipient = self.agents[message['recipient_index']]
             artifact = message['artifact']
             
             raw_novelty = novelty_scores[i]
@@ -895,7 +1018,7 @@ class ParallelScheduler(Scheduler):
         novelty_scores = novelty_scores_tensor.cpu().numpy()
 
         for i, artifact in enumerate(evaluated_artifacts):
-            agent = self.agents[artifact.producer_id]
+            agent = self._get_agent_by_id(artifact.producer_id)
             features = query_batch[i].unsqueeze(0)
             self._initialize_artifact_metadata(artifact, source='generation')
 

@@ -174,7 +174,13 @@ class Agent:
     # Preferred novelty ~ N(0.5, 0.155), clipped [0,1] (3.3.4)
     preferred_novelty: float = 0.5
     # Exponential moving alpha decay for cumulative interest (3.4)
-    alpha: float = 0.35 
+    alpha: float = 0.35
+
+    # Lifespan mechanism: generational turnover.
+    # age increments each step; when age >= lifespan, the agent
+    # is replaced by a fresh one. lifespan=0 means immortal (default).
+    age: int = 0
+    lifespan: int = 0
 
     def _hall_of_fame_interest(self, entry: Any) -> float:
         """

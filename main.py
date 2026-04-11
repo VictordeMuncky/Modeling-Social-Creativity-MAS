@@ -215,6 +215,10 @@ def main():
                         help='Directory for --save_images output.')
     parser.add_argument('--log_dir', type=str, default=None,
                         help='Override log output directory.')
+    parser.add_argument('--agent_lifespan', type=int, default=0,
+                        help='Fixed agent lifespan in steps. '
+                             '0 = disabled (agents live forever, default). '
+                             '>0 = agents are replaced after this many steps.')
     args = parser.parse_args()
 
     # --- Configuration ---
@@ -252,12 +256,13 @@ def main():
         'nearest_domain_artifact_id', 'nearest_domain_similarity', 'domain_source', 'domain_parent_id',
         'domain_mode', 'domain_strategy', 'domain_strategy_value', 'domain_selection_policy', 
         'retrieval_relation_type', 'retrieval_score', 'retrieval_rank', 'retrieval_pool_size',
-        'retrieval_bucket', 'retrieval_estimated_novelty', 'retrieval_motivation_gap', 'retrieval_fallback_random', 'retrieval_motivation_improvement'
+        'retrieval_bucket', 'retrieval_estimated_novelty', 'retrieval_motivation_gap', 'retrieval_fallback_random', 'retrieval_motivation_improvement',
+        'age', 'preferred_novelty'
     ]
     csv_logger = CSVLogger(
         log_file_path=csv_log_file, 
         fieldnames=log_fields,
-        allowed_event_types=['generation', 'share', 'boredom_adoption']
+        allowed_event_types=['generation', 'share', 'boredom_adoption', 'agent_death', 'agent_birth']
     )
 
     # --- Agent Initialization Logger Setup ---
@@ -333,7 +338,8 @@ def main():
             domain_strategy_value=args.domain_strategy_value,
             domain_selection_policy=args.domain_selection_policy,
             save_images=args.save_images,
-            image_output_dir=image_output_dir
+            image_output_dir=image_output_dir,
+            agent_lifespan=args.agent_lifespan
     )
 
     print(f"Starting simulation with {num_agents} agents for {num_steps} steps.")

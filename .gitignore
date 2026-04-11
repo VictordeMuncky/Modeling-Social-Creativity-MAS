@@ -1,4 +1,5 @@
 /exported_logs
+/runs
 /logs
 /__pycache__
 test_pipeline.py
