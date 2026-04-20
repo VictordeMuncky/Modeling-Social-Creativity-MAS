@@ -35,7 +35,7 @@ class Domain:
     """
 
     VALID_MODES = ("flat", "similarity", "lineage")
-    VALID_STRATEGIES = ("nearest", "mid", "far")
+    VALID_STRATEGIES = ("nearest", "mid", "far", "learned")
     VALID_SELECTION_POLICIES = ("simple", "novelty_match")
     STRATEGY_WINDOW = 0.15
 
@@ -363,7 +363,7 @@ class Domain:
     def _strategy_target(self, strategy: str, strategy_value: Optional[float]) -> float:
         if strategy_value is not None:
             return min(1.0, max(0.0, float(strategy_value)))
-        return {'nearest': 0.0, 'mid': 0.5, 'far': 1.0}[strategy]
+        return {'nearest': 0.0, 'mid': 0.5, 'far': 1.0, 'learned': 0.5}[strategy]
 
     def _bucket_label(self, position: float) -> str:
         if position <= (1.0 / 3.0):
