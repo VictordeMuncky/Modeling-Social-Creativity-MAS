@@ -196,19 +196,6 @@ def main():
                         choices=['flat', 'similarity', 'lineage'],
                         help='Domain retrieval/indexing mode. "flat" preserves the baseline '
                              'archive behavior as closely as possible.')
-    parser.add_argument('--domain_strategy', type=str, default='nearest',
-                        choices=['nearest', 'mid', 'far'],
-                        help='How agents navigate structured domain memory. '
-                             'nearest favors close relations, mid favors moderate relations, '
-                             'and far favors distant relations.')
-    parser.add_argument('--domain_strategy_value', type=float, default=None,
-                        help='Optional continuous strategy position in [0,1]. '
-                             '0 = closest available, 0.5 = moderate, 1 = farthest available.')
-    parser.add_argument('--domain_selection_policy', type=str, default='simple',
-                        choices=['simple', 'novelty_match'],
-                        help='How to choose within the selected near/mid/far region. '
-                            'simple = random pick inside region; '
-                            'novelty_match = pick the artifact whose region position best matches preferred novelty.')
     parser.add_argument('--save_images', action='store_true',
                         help='Save rendered artifact PNGs (debug).')
     parser.add_argument('--image_output_dir', type=str, default=None,
@@ -334,9 +321,6 @@ def main():
             distance_metric=args.distance_metric,
             boredom_mode=args.boredom_mode,
             domain_mode=args.domain_mode,
-            domain_strategy=args.domain_strategy,
-            domain_strategy_value=args.domain_strategy_value,
-            domain_selection_policy=args.domain_selection_policy,
             save_images=args.save_images,
             image_output_dir=image_output_dir,
             agent_lifespan=args.agent_lifespan
@@ -346,8 +330,7 @@ def main():
     print(f"Sharing with {share_count} agents. Uniform novelty: {uniform_novelty_pref}")
     print(f"Mutation rate: {mutation_rate}")
     print(f"Domain mode: {args.domain_mode}")
-    print(f"Domain strategy: {args.domain_strategy} (value={args.domain_strategy_value})")
-    print(f"Domain selection policy: {args.domain_selection_policy}")
+    print(f"Domain strategy: adaptive (agents learn their own strategy_pref)")
     print(f"Using static noise: {use_static_noise}")
     print(f"Logs will be saved in: {log_dir}")
     

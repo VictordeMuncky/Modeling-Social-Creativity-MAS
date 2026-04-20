@@ -185,9 +185,6 @@ class ParallelScheduler(Scheduler):
                  pca_calibration_samples: int = 500, distance_metric: str = 'cosine',
                  boredom_mode: str = 'classic',
                  domain_mode: str = 'flat',
-                 domain_strategy: str = 'nearest',
-                 domain_strategy_value: Optional[float] = None,
-                 domain_selection_policy: str = 'simple',
                  save_images: bool = False,
                  image_output_dir: str = None,
                  agent_lifespan: int = 0):
@@ -209,9 +206,6 @@ class ParallelScheduler(Scheduler):
         self.distance_metric = distance_metric
         self.boredom_mode = boredom_mode
         self.domain_mode = domain_mode
-        self.domain_strategy = domain_strategy
-        self.domain_strategy_value = domain_strategy_value
-        self.domain_selection_policy = domain_selection_policy
         self.save_images = save_images
         self.image_output_dir = image_output_dir
         self.agent_lifespan = agent_lifespan
@@ -283,9 +277,6 @@ class ParallelScheduler(Scheduler):
             'domain_source': metadata.get('domain_source'),
             'domain_parent_id': metadata.get('domain_parent_id'),
             'domain_mode': self.domain.mode,
-            'domain_strategy': self.domain_strategy,
-            'domain_strategy_value': self.domain_strategy_value,
-            'domain_selection_policy': self.domain_selection_policy,
         }
 
     def _agent_domain_query_metadata(self, agent: Agent) -> Dict[str, object]:
@@ -320,9 +311,6 @@ class ParallelScheduler(Scheduler):
 
     def _retrieval_log_fields(self, retrieval_info: Dict[str, object]) -> Dict[str, object]:
         return {
-            'domain_strategy': retrieval_info.get('strategy', self.domain_strategy),
-            'domain_strategy_value': retrieval_info.get('strategy_value', self.domain_strategy_value),
-            'domain_selection_policy': retrieval_info.get('selection_policy', self.domain_selection_policy),
             'retrieval_relation_type': retrieval_info.get('relation_type'),
             'retrieval_score': retrieval_info.get('score'),
             'retrieval_rank': retrieval_info.get('rank'),
@@ -355,8 +343,6 @@ class ParallelScheduler(Scheduler):
             'is_new_artifact': is_new,
             'domain_size': len(self.domain),
             'domain_mode': self.domain.mode,
-            'domain_strategy': self.domain_strategy,
-            'domain_strategy_value': self.domain_strategy_value,
             'retrieval_mode': self.domain.mode,
             'relevance_score': None,
             'query_artifact_id': None,
@@ -943,6 +929,16 @@ class ParallelScheduler(Scheduler):
                 'novelty': normalized_novelty
             })
 
+            # Peer-feedback reward: if the sender is still around, use the
+            # recipient's interest as an additional reward signal to update
+            # their domain strategy preference. 
+            sender = self._get_agent_by_id(message['sender_id'])
+            if sender is not None and sender.pending_retrieval_pos is not None:
+                sender.update_strategy_pref(
+                    outcome_interest=interest,
+                    reference_interest=sender.average_interest,
+                )
+
             self.logger.log_event('share', {
                 'agent_id': message['sender_id'],
                 'step': self.step_count, 'sender_id': message['sender_id'], 'recipient_id': recipient.unique_id,
@@ -1174,13 +1170,16 @@ class ParallelScheduler(Scheduler):
                 query_metadata=self._agent_domain_query_metadata(agent),
                 mode=self.domain.mode,
                 exclude_artifact_id=agent.current_artifact_id,
-                strategy=self.domain_strategy,
-                strategy_value=self.domain_strategy_value,
-                selection_policy=self.domain_selection_policy,
+                strategy='learned',
+                strategy_value=agent.strategy_pref,
+                selection_policy='simple',
                 preferred_novelty=agent.preferred_novelty,
             )
             if domain_artifact is None:
                 continue
+            # Remember the position we sampled so update_strategy_pref
+            # can credit the outcome back to this choice.
+            agent.pending_retrieval_pos = retrieval_info.get('estimated_novelty')
             classic_agents.append(agent)
             chosen_artifacts.append((domain_artifact, retrieval_info))
 
@@ -1343,6 +1342,17 @@ class ParallelScheduler(Scheduler):
                 agent.current_creator_id  = domain_artifact.creator_id
                 self._sync_agent_domain_context(agent, artifact=domain_artifact)
 
+            # Adaptive strategy update: use the retrieved artifact's
+            # interest as the self-reward signal, compared against the
+            # agent's running average. pending_retrieval_pos is left
+            # set so peer feedback in the next step's interaction_phase
+            # can also contribute a reward signal; it will be overwritten
+            # by the next boredom retrieval.
+            agent.update_strategy_pref(
+                outcome_interest=interest,
+                reference_interest=agent.average_interest,
+            )
+
             self.logger.log_event('domain_event', {
                 'step': self.step_count,
                 'operation': 'retrieve',
@@ -1352,8 +1362,7 @@ class ParallelScheduler(Scheduler):
                 'is_new_artifact': None,
                 'domain_size': len(self.domain),
                 'domain_mode': self.domain.mode,
-                'domain_strategy': self.domain_strategy,
-                'domain_strategy_value': self.domain_strategy_value,
+                'agent_strategy_pref': agent.strategy_pref,
                 'retrieval_mode': retrieval_info.get('retrieval_mode'),
                 'relevance_score': retrieval_info.get('score'),
                 'query_artifact_id': agent.current_artifact_id,
@@ -1438,9 +1447,9 @@ class ParallelScheduler(Scheduler):
                 query_metadata=self._agent_domain_query_metadata(agent),
                 mode=self.domain.mode,
                 exclude_artifact_id=agent.current_artifact_id,
-                strategy=self.domain_strategy,
-                strategy_value=self.domain_strategy_value,
-                selection_policy=self.domain_selection_policy,
+                strategy='learned',
+                strategy_value=agent.strategy_pref,
+                selection_policy='simple',
                 preferred_novelty=agent.preferred_novelty,
             )
             if parent_artifact is None:
@@ -1448,6 +1457,11 @@ class ParallelScheduler(Scheduler):
                 source_creator_id = agent.unique_id
                 source_type = "random_restart"
             else:
+                # Remember where we looked. In extended mode we don't
+                # directly evaluate the retrieved artifact's interest
+                # (the mutated child is evaluated next step), so the
+                # update will happen when that child's outcome is known.
+                agent.pending_retrieval_pos = retrieval_info.get('estimated_novelty')
                 parent_expr = parent_artifact.content
                 source_creator_id = parent_artifact.creator_id
                 source_type = retrieval_info.get('retrieval_mode', 'domain_exploration')
@@ -1484,8 +1498,7 @@ class ParallelScheduler(Scheduler):
                 'is_new_artifact': None,
                 'domain_size': len(self.domain),
                 'domain_mode': self.domain.mode,
-                'domain_strategy': self.domain_strategy,
-                'domain_strategy_value': self.domain_strategy_value,
+                'agent_strategy_pref': agent.strategy_pref,
                 'retrieval_mode': retrieval_info.get('retrieval_mode'),
                 'relevance_score': retrieval_info.get('score'),
                 'query_artifact_id': agent.current_artifact_id,

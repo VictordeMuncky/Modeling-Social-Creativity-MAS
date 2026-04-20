@@ -182,6 +182,19 @@ class Agent:
     age: int = 0
     lifespan: int = 0
 
+    # Adaptive domain strategy (replaces static nearest/mid/far + novelty_match).
+    # strategy_pref is a learned position in [0,1] on the ranked list of
+    # domain candidates the structure returned: 0 = closest relations,
+    # 1 = farthest relations. The agent starts neutral at 0.5 and nudges
+    # this value based on whether a retrieval produced high or low interest
+    # (either self-evaluation or peer feedback from shared derivations).
+    # pending_retrieval_pos stores the position they just sampled so the
+    # outcome can be credited back to that position.
+    strategy_pref: float = 0.5
+    pending_retrieval_pos: Optional[float] = None
+    # Learning rate for the adaptive update. Small so it's smooth.
+    strategy_lr: float = 0.05
+
     def _hall_of_fame_interest(self, entry: Any) -> float:
         """
         Returns interest for both legacy tuple entries and structured entries.
@@ -211,6 +224,32 @@ class Agent:
         self.hall_of_fame.sort(key=self._hall_of_fame_interest, reverse=True)
         if len(self.hall_of_fame) > self.max_fame_size:
             self.hall_of_fame = self.hall_of_fame[:self.max_fame_size]
+
+    def update_strategy_pref(self, outcome_interest: float, reference_interest: float = 0.0):
+        """
+        Adaptive strategy update: nudge strategy_pref toward the position
+        just sampled if that position produced better-than-expected interest,
+        away if worse.
+
+        Intended to be called after the agent (or a peer) evaluates the
+        artifact that was bred from a domain retrieval. pending_retrieval_pos
+        is the position in [0,1] the domain returned; outcome_interest is
+        how well that choice worked out; reference_interest is a baseline
+        to compare against (average_interest).
+
+        No-op if there's no pending retrieval position recorded.
+        """
+        if self.pending_retrieval_pos is None:
+            return
+        pos = float(self.pending_retrieval_pos)
+        # Reward signal: positive when outcome beat the baseline, negative otherwise.
+        # Bounded in roughly [-1, 1] so updates stay small.
+        reward = float(outcome_interest) - float(reference_interest)
+        # Clamp to avoid runaway updates from extreme values.
+        reward = max(-1.0, min(1.0, reward))
+        # Nudge toward (or away from) the sampled position.
+        delta = self.strategy_lr * reward * (pos - self.strategy_pref)
+        self.strategy_pref = max(0.0, min(1.0, self.strategy_pref + delta))
 
 
 # DIFI: Interaction component - the scheduler orchestrates the
