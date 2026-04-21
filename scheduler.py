@@ -317,8 +317,6 @@ class ParallelScheduler(Scheduler):
             'retrieval_pool_size': retrieval_info.get('pool_size'),
             'retrieval_bucket': retrieval_info.get('bucket'),
             'retrieval_estimated_novelty': retrieval_info.get('estimated_novelty'),
-            'retrieval_motivation_gap': retrieval_info.get('motivation_gap'),
-            'retrieval_motivation_improvement': retrieval_info.get('motivation_improvement'),
             'retrieval_fallback_random': retrieval_info.get('fallback_random', False),
         }
 
@@ -1372,8 +1370,6 @@ class ParallelScheduler(Scheduler):
                 'retrieval_pool_size': retrieval_info.get('pool_size'),
                 'retrieval_bucket': retrieval_info.get('bucket'),
                 'retrieval_estimated_novelty': retrieval_info.get('estimated_novelty'),
-                'retrieval_motivation_gap': retrieval_info.get('motivation_gap'),
-                'retrieval_motivation_improvement': retrieval_info.get('motivation_improvement'),
                 **self._artifact_metadata_snapshot(domain_artifact),
             })
 
@@ -1391,6 +1387,7 @@ class ParallelScheduler(Scheduler):
                 'evaluator_id':    agent.unique_id,
                 'domain_size':     len(self.domain),
                 'domain_mode':     self.domain.mode,
+                'agent_strategy_pref': agent.strategy_pref,
                 **self._retrieval_log_fields(retrieval_info),
                 **self._artifact_metadata_snapshot(domain_artifact),
             })
@@ -1508,8 +1505,6 @@ class ParallelScheduler(Scheduler):
                 'retrieval_pool_size': retrieval_info.get('pool_size'),
                 'retrieval_bucket': retrieval_info.get('bucket'),
                 'retrieval_estimated_novelty': retrieval_info.get('estimated_novelty'),
-                'retrieval_motivation_gap': retrieval_info.get('motivation_gap'),
-                'retrieval_motivation_improvement': retrieval_info.get('motivation_improvement'),
                 **self._artifact_metadata_snapshot(parent_artifact),
             })
 

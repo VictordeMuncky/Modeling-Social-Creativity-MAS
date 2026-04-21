@@ -36,8 +36,8 @@ class Domain:
 
     VALID_MODES = ("flat", "similarity", "lineage")
     VALID_STRATEGIES = ("nearest", "mid", "far", "learned")
-    VALID_SELECTION_POLICIES = ("simple", "novelty_match")
-    STRATEGY_WINDOW = 0.15
+    VALID_SELECTION_POLICIES = ("simple",)
+    STRATEGY_WINDOW = 0.05
 
     def __init__(self, mode: str = "flat"):
         if mode not in self.VALID_MODES:
@@ -130,7 +130,6 @@ class Domain:
                 'pool_size': 0,
                 'bucket': None,
                 'estimated_novelty': None,
-                'motivation_gap': None,
                 'fallback_random': False,
             }
 
@@ -146,7 +145,6 @@ class Domain:
             'pool_size': len(candidates),
             'bucket': 'random',
             'estimated_novelty': None,
-            'motivation_gap': None,
             'fallback_random': False,
         }
 
@@ -409,22 +407,6 @@ class Domain:
 
         if selection_policy == 'simple':
             selected_idx = random.choice(candidate_indices)
-            motivation_gap = None
-        elif selection_policy == 'novelty_match':
-            preferred = 0.5 if preferred_novelty is None else float(preferred_novelty)
-
-            def objective(idx: int):
-                position = idx / max(1, n - 1)
-                raw_score = scored[idx][1]
-                return (
-                    abs(position - preferred),
-                    abs(position - target),
-                    -raw_score,
-                )
-
-            selected_idx = min(candidate_indices, key=objective)
-            position = selected_idx / max(1, n - 1)
-            motivation_gap = abs(position - preferred)
         else:
             raise ValueError(f"Unsupported selection policy '{selection_policy}'.")
 
@@ -442,7 +424,6 @@ class Domain:
             'pool_size': int(n),
             'bucket': self._bucket_label(position),
             'estimated_novelty': float(position),
-            'motivation_gap': None if selection_policy == 'simple' else float(motivation_gap),
             'fallback_random': False,
         }
 

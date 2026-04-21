@@ -241,9 +241,9 @@ def main():
         'root_creator_id', 'lineage_depth', 'generation_step', 'entered_domain_step',
         'views', 'shares', 'domain_entry_count',
         'nearest_domain_artifact_id', 'nearest_domain_similarity', 'domain_source', 'domain_parent_id',
-        'domain_mode', 'domain_strategy', 'domain_strategy_value', 'domain_selection_policy', 
+        'domain_mode', 'agent_strategy_pref' 
         'retrieval_relation_type', 'retrieval_score', 'retrieval_rank', 'retrieval_pool_size',
-        'retrieval_bucket', 'retrieval_estimated_novelty', 'retrieval_motivation_gap', 'retrieval_fallback_random', 'retrieval_motivation_improvement',
+        'retrieval_bucket', 'retrieval_estimated_novelty', 'retrieval_fallback_random', 
         'age', 'preferred_novelty'
     ]
     csv_logger = CSVLogger(
@@ -277,11 +277,11 @@ def main():
     # --- Domain Observability Logger Setup ---
     domain_log_file = os.path.join(log_dir, "domain.csv")
     domain_log_fields = [
-        'timestamp', 'event_type', 'step', 'operation', 'domain_mode', 'domain_strategy', 'domain_strategy_value', 'domain_selection_policy', 
+        'timestamp', 'event_type', 'step', 'operation', 'domain_mode', 'agent_strategy_pref',
         'retrieval_mode', 'query_artifact_id', 'retrieved_artifact_id', 'artifact_id', 'creator_id', 'accepted_by',
         'relation_type', 'relevance_score', 'is_new_artifact', 'domain_size',
         'retrieval_rank', 'retrieval_pool_size', 'retrieval_bucket', 'retrieval_estimated_novelty',
-        'retrieval_motivation_gap', 'retrieval_fallback_random', 'retrieval_motivation_improvement',
+        'retrieval_fallback_random', 
         'root_creator_id', 'lineage_depth', 'generation_step', 'entered_domain_step',
         'views', 'shares', 'domain_entry_count',
         'nearest_domain_artifact_id', 'nearest_domain_similarity', 'domain_source', 'domain_parent_id'
@@ -350,6 +350,7 @@ def main():
                 timing_stats.reset_step()
         print("Simulation finished successfully.")
     except Exception as e:
+        import traceback
         print(f"An error occurred during the simulation: {e}")
     finally:
         scheduler.close()
