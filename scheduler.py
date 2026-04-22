@@ -209,6 +209,8 @@ class ParallelScheduler(Scheduler):
         self.save_images = save_images
         self.image_output_dir = image_output_dir
         self.agent_lifespan = agent_lifespan
+        self.min_lifespan = 20
+        self.max_lifespan = 70
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.gpu_stream = torch.cuda.Stream() if self.device.type == 'cuda' else None
@@ -413,7 +415,7 @@ class ParallelScheduler(Scheduler):
                 wundt=wundt,
                 gen_depth=np.random.randint(4, 6),
                 preferred_novelty=preferred_novelty,
-                lifespan=self.agent_lifespan
+                lifespan=self._sample_lifespan()
             )
 
             # Initialize new attributes for tracking stats
@@ -555,6 +557,19 @@ class ParallelScheduler(Scheduler):
             agent.current_interest = refreshed_interest
             agent.current_novelty = normalized_novelty
 
+    def _sample_lifespan(self) -> int:
+        """
+        If agent_lifespan is enabled, draw a random lifespan per agent
+        from [min_lifespan, max_lifespan]. 
+
+        Rationale: heterogeneous lifespans let us observe mixed populations
+        of elder experts and young newcomers, making field and gatekeeper dynamics
+        more visible.
+        """
+        if self.agent_lifespan <= 0:
+            return 0
+        return int(np.random.randint(self.min_lifespan, self.max_lifespan + 1))
+
     def _create_replacement_agent(self, slot_index: int) -> Agent:
         """
         Creates a fresh agent to replace one that has reached its lifespan.
@@ -592,7 +607,7 @@ class ParallelScheduler(Scheduler):
             wundt=wundt,
             gen_depth=np.random.randint(4, 6),
             preferred_novelty=preferred_novelty,
-            lifespan=self.agent_lifespan
+            lifespan=self._sample_lifespan()
         )
 
         # Initialize tracking stats (same as _initialize_agents)
