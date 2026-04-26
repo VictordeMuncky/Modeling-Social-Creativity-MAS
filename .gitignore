@@ -8,3 +8,4 @@ test_pipeline.py
 run_modularity_experiment.bat
 test.png
 .vscode/settings.json
+/venv
